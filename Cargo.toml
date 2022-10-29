@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0.147", features = ["derive"] }
 serde-xml-rs = "0.6.0"
-curl = "0.4.44"
+isahc = "1.7.2"
