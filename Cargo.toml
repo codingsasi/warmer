@@ -9,3 +9,4 @@ edition = "2021"
 serde = { version = "1.0.147", features = ["derive"] }
 serde-xml-rs = "0.6.0"
 isahc = "1.7.2"
+clap = { version = "4.0.18", features = ["derive"] }

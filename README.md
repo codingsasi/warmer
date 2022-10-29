@@ -44,7 +44,8 @@ warmer http(s)://someurl.com/sitemap.xml interl
  - warmer https://abh.ai/sitemap.xml 1
 ```
 - The interval value should be specified in seconds, and it's how long the warmer waiting before loading the next URL in the sitemap.
-- The url should be specified with scheme as well.
+- The default interval is 5 seconds. No interval (0s) is allowed but use only if you want to DDOS your own site.
+- The complete url should be specified with scheme as well.
 
 ### Notes
 Large sitemaps, that include other zipped or gzipped sitemaps are not supported yet. I'll release that as and when I get time. But for most sitemaps this should warm it just fine.

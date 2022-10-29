@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_xml_rs::{from_str};
 use std::{thread, time};
 use isahc::{config::RedirectPolicy, prelude::*, Request};
-use std::env;
+use clap::Parser;
 
 /// The struct to deserialize and hold the items in <url></url>
 /// in the sitemap.xml
@@ -31,13 +31,19 @@ struct UrlSet {
     url: Vec<Url>
 }
 
+/// Search for a pattern in a file and display the lines that contain it.
+#[derive(Parser)]
+struct Cli {
+    /// The sitemap url
+    url: String,
+    /// The time interval between requests
+    #[arg(default_value_t = 5)]
+    interval: u64,
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut interval = "5";
-    if args.len() <= 1 {
-        interval = &args[2];
-    }
-    let mut response = Request::get(&args[1])
+    let args = Cli::parse();
+    let mut response = Request::get(args.url)
         .redirect_policy(RedirectPolicy::Follow)
         .body(()).unwrap()
         .send().unwrap();
@@ -54,7 +60,10 @@ fn main() {
             .body(()).unwrap()
             .send().unwrap();
         println!("{}", page.status().as_str());
-        thread::sleep(time::Duration::from_secs(interval.parse::<u64>().unwrap()));
+        println!("{:?}", args.interval);
+        if args.interval != 0 {
+            thread::sleep(time::Duration::from_secs(args.interval));
+        }
     }
 }
 
