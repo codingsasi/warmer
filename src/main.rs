@@ -34,7 +34,7 @@ struct UrlSet {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut interval = "5";
-    if args.len() > 1 {
+    if args.len() <= 1 {
         interval = &args[2];
     }
     let mut response = Request::get(&args[1])
