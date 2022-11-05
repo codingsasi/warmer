@@ -40,8 +40,8 @@ A CDN cache warmer in rust for the sitemap.xml files that look like this:
 Download (from [here](https://github.com/codingsasi/warmer/releases)) and run the executable binary on linux with the following command
 ```
 warmer http(s)://someurl.com/sitemap.xml interl
- - warmer https://abh.ai/sitemap.xml 5
- - warmer https://abh.ai/sitemap.xml 1
+ - ./warmer https://abh.ai/sitemap.xml 5
+ - ./warmer https://abh.ai/sitemap.xml 1
 ```
 - The interval value should be specified in seconds, and it's how long the warmer waiting before loading the next URL in the sitemap.
 - The default interval is 5 seconds. No interval (0s) is allowed but use only if you want to DDOS your own site.
