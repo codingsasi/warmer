@@ -3,9 +3,8 @@ extern crate core;
 use serde::{Deserialize, Serialize};
 use serde_xml_rs::{from_str};
 use std::{thread, time};
-use std::cell::RefCell;
-use std::iter::Sum;
 use std::process::exit;
+use std::sync::{Arc, Mutex};
 use isahc::{config::RedirectPolicy, prelude::*, Request};
 use clap::Parser;
 use ctrlc;
@@ -53,23 +52,39 @@ struct Summary {
     avg_response_time: usize
 }
 
+impl Summary {
+    fn count(&mut self) {
+        self.count = self.count + 1;
+    }
+
+    fn calc_response_time(&mut self, value: usize) {
+        self.response_times.push(value)
+    }
+
+    fn calc_avg_response_time(&mut self, value: usize) {
+        self.avg_response_time = value;
+    }
+}
+
 fn main() {
-    let mut summary = Summary {
+    let summary = Arc::new(Mutex::new(Summary {
         count: 0,
         response_times: Vec::new(),
         avg_response_time: 0
-    };
+    }));
+    let s = summary.clone();
     ctrlc::set_handler(move || {
-        println!("received Ctrl+C!");
         // show_summary_after_ctrlc(summary.clone());
         let mut total = 0;
-        for rt in summary.response_times.iter() {
+        for rt in s.lock().unwrap().response_times.iter() {
             total = total + rt;
         }
-        summary.avg_response_time = total / summary.response_times.len();
+        let avg_res_time = total / s.lock().unwrap().response_times.len();
+        println!("\n--------------------------------------------------------");
         println!("Warmer stopped abruptly!");
-        println!("Total URLs loaded: {}", summary.count);
-        println!("Average Response time: {} ms", summary.avg_response_time);
+        println!("Total URLs loaded: {}", s.lock().unwrap().count);
+        println!("Average Response time: {} ms", avg_res_time);
+        println!("--------------------------------------------------------");
         exit(0);
     })
     .expect("Error setting Ctrl-C handler");
@@ -84,15 +99,15 @@ fn main() {
     let src = response.text().unwrap();
     println!("The sitemap was loaded successfully!");
     let us: UrlSet = from_str(src.as_str()).unwrap();
-    load_pages(&us, &args, &mut summary);
-    show_summary(&mut summary);
+    load_pages(&us, &args, summary.clone());
+    show_summary(summary.clone());
 }
 
 /// Load pages in urlset.
-fn load_pages(urlset: &UrlSet, args: &Cli, summary: &mut Summary) {
+fn load_pages(urlset: &UrlSet, args: &Cli, summary: Arc<Mutex<Summary>>) {
     for url in urlset.url.iter() {
         println!("{:?}", url.loc);
-        summary.count = summary.count + 1;
+        summary.lock().unwrap().count();
         // Start measuring time.
         let now = Instant::now();
         let page = Request::get(&url.loc)
@@ -101,7 +116,7 @@ fn load_pages(urlset: &UrlSet, args: &Cli, summary: &mut Summary) {
             .send().unwrap();
         // End measuring and save elapsed.
         let elapsed = now.elapsed();
-        summary.response_times.push(elapsed.as_millis() as usize);
+        summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
         println!("{}", page.status().as_str());
         println!("{:?}", args.interval);
         if args.interval != 0 {
@@ -112,14 +127,17 @@ fn load_pages(urlset: &UrlSet, args: &Cli, summary: &mut Summary) {
 
 /// Print summary.
 /// Total URLs loaded and average response time.
-fn show_summary(summary: &mut Summary) {
+fn show_summary(summary: Arc<Mutex<Summary>>) {
     let mut total = 0;
-    for rt in summary.response_times.iter() {
+    for rt in summary.lock().unwrap().response_times.iter() {
         total = total + rt;
     }
-    summary.avg_response_time = total / summary.response_times.len();
-    println!("Total URLs loaded: {}", summary.count);
-    println!("Average Response time: {} ms", summary.avg_response_time);
+    let avg_res_time = total / summary.lock().unwrap().response_times.len();
+    summary.lock().unwrap().calc_avg_response_time(avg_res_time);
+    println!("\n--------------------------------------------------------");
+    println!("Total URLs loaded: {}", summary.lock().unwrap().count);
+    println!("Average Response time: {} ms", summary.lock().unwrap().avg_response_time);
+    println!("--------------------------------------------------------");
 }
 
 /// Returns a static string to use in place of missing
