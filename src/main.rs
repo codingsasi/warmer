@@ -1,5 +1,3 @@
-extern crate core;
-
 use serde::{Deserialize, Serialize};
 use serde_xml_rs::{from_str};
 use std::{thread, time};
@@ -9,6 +7,7 @@ use isahc::{config::RedirectPolicy, prelude::*, Request};
 use clap::Parser;
 use ctrlc;
 use std::time::Instant;
+use scraper::{Html, Selector};
 
 /// The struct to deserialize and hold the items in <url></url>
 /// in the sitemap.xml
@@ -44,6 +43,21 @@ struct Cli {
     interval: u64,
 }
 
+/// Store static assets that have been cached once in memory.
+struct Assets {
+    urls: Vec<String>
+}
+
+impl Assets {
+    fn add(&mut self, value: String) {
+        self.urls.push(value)
+    }
+
+    fn contains(&mut self, value: &String) -> bool {
+        self.urls.contains(&value.to_string())
+    }
+}
+
 /// The summary of loading URLs from sitemap.
 #[derive(Clone)]
 struct Summary {
@@ -72,9 +86,11 @@ fn main() {
         response_times: Vec::new(),
         avg_response_time: 0
     }));
+    let static_assets = Arc::new(Mutex::new(Assets {
+        urls: Vec::new()
+    }));
     let s = summary.clone();
     ctrlc::set_handler(move || {
-        // show_summary_after_ctrlc(summary.clone());
         let mut total = 0;
         for rt in s.lock().unwrap().response_times.iter() {
             total = total + rt;
@@ -82,14 +98,16 @@ fn main() {
         let avg_res_time = total / s.lock().unwrap().response_times.len();
         println!("\n--------------------------------------------------------");
         println!("Warmer stopped abruptly!");
-        println!("Total URLs loaded: {}", s.lock().unwrap().count);
+        println!("Total requests: {}", s.lock().unwrap().count);
         println!("Average Response time: {} ms", avg_res_time);
         println!("--------------------------------------------------------");
         exit(0);
     })
     .expect("Error setting Ctrl-C handler");
     let args = Cli::parse();
-    let mut response = Request::get(&args.url)
+    let base_url = args.url.to_owned();
+    let sitemap_url = base_url.clone() + "/sitemap.xml";
+    let mut response = Request::get(sitemap_url)
         .redirect_policy(RedirectPolicy::Follow)
         .body(()).unwrap()
         .send().unwrap();
@@ -99,28 +117,122 @@ fn main() {
     let src = response.text().unwrap();
     println!("The sitemap was loaded successfully!");
     let us: UrlSet = from_str(src.as_str()).unwrap();
-    load_pages(&us, &args, summary.clone());
+    load_pages(&us, &args, summary.clone(), &base_url, static_assets.clone());
     show_summary(summary.clone());
 }
 
 /// Load pages in urlset.
-fn load_pages(urlset: &UrlSet, args: &Cli, summary: Arc<Mutex<Summary>>) {
+fn load_pages(urlset: &UrlSet, args: &Cli, summary: Arc<Mutex<Summary>>, base_url: &String, static_assets: Arc<Mutex<Assets>>) {
     for url in urlset.url.iter() {
         println!("{:?}", url.loc);
-        summary.lock().unwrap().count();
         // Start measuring time.
         let now = Instant::now();
-        let page = Request::get(&url.loc)
+        let mut page = Request::get(&url.loc)
             .redirect_policy(RedirectPolicy::Follow)
             .body(()).unwrap()
             .send().unwrap();
         // End measuring and save elapsed.
         let elapsed = now.elapsed();
-        summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
         println!("{}", page.status().as_str());
-        println!("{:?}", args.interval);
+        summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+        summary.lock().unwrap().count();
+        load_assets(page.text().unwrap(), summary.clone(), &base_url, static_assets.clone());
         if args.interval != 0 {
             thread::sleep(time::Duration::from_secs(args.interval));
+        }
+    }
+}
+
+/// Load, css, js and other static assets.
+fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, static_assets: Arc<Mutex<Assets>>) {
+    let html = Html::parse_fragment(&body);
+    let links_selector = Selector::parse("link").unwrap();
+    let img_selector = Selector::parse("img").unwrap();
+    let script_selector = Selector::parse("script").unwrap();
+    let mut url: String;
+    for link in html.select(&links_selector) {
+        match link.value().attr("href") {
+            Some(href) => {
+                // Remove token
+                if !static_assets.lock().unwrap().contains(&href.to_string()) {
+                    if href.contains("http://") || href.contains("https://") || href.contains("//") {
+                        url = href.to_string();
+                    }
+                    else {
+                        url = base_url.to_string() + &href;
+                    }
+                    println!("{}", url);
+                    // Start measuring time.
+                    let now = Instant::now();
+                    let link_asset = Request::get(url)
+                        .redirect_policy(RedirectPolicy::Follow)
+                        .body(()).unwrap()
+                        .send().unwrap();
+                    // End measuring and save elapsed.
+                    let elapsed = now.elapsed();
+                    println!("{}", link_asset.status().as_str());
+                    summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                    summary.lock().unwrap().count();
+                    static_assets.lock().unwrap().add(href.to_string());
+                }
+            }
+            _ => {
+                // Do nothing if href is not found.
+            }
+        }
+    }
+    for img in html.select(&img_selector) {
+        match img.value().attr("src") {
+            Some(src) => {
+                if src.contains("http://") || src.contains("https://") || src.contains("//") {
+                    url = src.to_string();
+                }
+                else {
+                    url = base_url.to_string() + src;
+                }
+                println!("{}", url);
+                // Start measuring time.
+                let now = Instant::now();
+                let img_asset = Request::get(url)
+                    .redirect_policy(RedirectPolicy::Follow)
+                    .body(()).unwrap()
+                    .send().unwrap();
+                // End measuring and save elapsed.
+                let elapsed = now.elapsed();
+                println!("{}", img_asset.status().as_str());
+                summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                summary.lock().unwrap().count();
+            }
+            _ => {
+                // Do nothing if src is not found. Unlikely scenario.
+            }
+        }
+    }
+    for script in html.select(&script_selector) {
+        match script.value().attr("src") {
+            Some(src) => {
+                if src.contains("http://") || src.contains("https://") || src.contains("//") {
+                    url = src.to_string();
+                }
+                else {
+                    url = base_url.to_string() + src;
+                }
+                println!("{}", url);
+                // Start measuring time.
+                let now = Instant::now();
+                let img_asset = Request::get(url)
+                    .redirect_policy(RedirectPolicy::Follow)
+                    .body(()).unwrap()
+                    .send().unwrap();
+                // End measuring and save elapsed.
+                let elapsed = now.elapsed();
+                println!("{}", img_asset.status().as_str());
+                summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                summary.lock().unwrap().count();
+            }
+            _ => {
+                // If src is not found,  do nothing. Some <script> tags don't have src.
+            }
         }
     }
 }
@@ -135,7 +247,7 @@ fn show_summary(summary: Arc<Mutex<Summary>>) {
     let avg_res_time = total / summary.lock().unwrap().response_times.len();
     summary.lock().unwrap().calc_avg_response_time(avg_res_time);
     println!("\n--------------------------------------------------------");
-    println!("Total URLs loaded: {}", summary.lock().unwrap().count);
+    println!("Total requests: {}", summary.lock().unwrap().count);
     println!("Average Response time: {} ms", summary.lock().unwrap().avg_response_time);
     println!("--------------------------------------------------------");
 }
