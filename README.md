@@ -47,6 +47,13 @@ warmer http(s)://someurl.com interl
 - The default interval is 5 seconds. No interval (0s) is allowed but use only if you want to DDOS your own site.
 - The complete url should be specified with scheme as well.
 
+### Build from source
+1. Clone the repo
+2. cd warmer
+3. Install cargo https://doc.rust-lang.org/cargo/getting-started/installation.html
+4. cargo build --relase
+5. The binary will be in the target/release folder. It will also be named `warmer`
+
 ### Notes
 Large sitemaps, that include other zipped or gzipped sitemaps are not supported yet. I'll release that as and when I get time. But for most sitemaps this should warm it just fine.
 Currently on supported on 64-bit linux OS.
