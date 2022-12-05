@@ -51,7 +51,7 @@ warmer http(s)://someurl.com interl
 1. Clone the repo
 2. cd warmer
 3. Install cargo https://doc.rust-lang.org/cargo/getting-started/installation.html
-4. cargo build --relase
+4. cargo build --release
 5. The binary will be in the target/release folder. It will also be named `warmer`
 6. You may need to install `libudev-dev`, `libssl-dev`, `openssl`, `pkg-config`, `build-essential`.
 
