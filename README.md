@@ -53,6 +53,7 @@ warmer http(s)://someurl.com interl
 3. Install cargo https://doc.rust-lang.org/cargo/getting-started/installation.html
 4. cargo build --relase
 5. The binary will be in the target/release folder. It will also be named `warmer`
+6. You may need to install `libudev-dev`, `libssl-dev`, `openssl`, `pkg-config`, `build-essential`.
 
 ### Notes
 Large sitemaps, that include other zipped or gzipped sitemaps are not supported yet. I'll release that as and when I get time. But for most sitemaps this should warm it just fine.
