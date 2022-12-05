@@ -133,13 +133,24 @@ fn load_pages(urlset: &UrlSet, args: &Cli, summary: Arc<Mutex<Summary>>, base_ur
             .send().unwrap();
         // End measuring and save elapsed.
         let elapsed = now.elapsed();
-        println!("{}", page.status().as_str());
-        summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
-        summary.lock().unwrap().count();
-        load_assets(page.text().unwrap(), summary.clone(), &base_url, static_assets.clone());
-        if args.interval != 0 {
-            thread::sleep(time::Duration::from_secs(args.interval));
+        match page.text() {
+            Ok(body) => {
+                println!("{}", page.status().as_str());
+                summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                summary.lock().unwrap().count();
+                load_assets(body, summary.clone(), &base_url, static_assets.clone());
+                if args.interval != 0 {
+                    thread::sleep(time::Duration::from_secs(args.interval));
+                }
+            }
+            Err(e) => {
+                println!("Some error occurred: {}", e.to_string());
+                println!("{}", page.status().as_str());
+                summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                summary.lock().unwrap().count();
+            }
         }
+
     }
 }
 
@@ -164,16 +175,22 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
                     println!("{}", url);
                     // Start measuring time.
                     let now = Instant::now();
-                    let link_asset = Request::get(url)
+                    match Request::get(url)
                         .redirect_policy(RedirectPolicy::Follow)
                         .body(()).unwrap()
-                        .send().unwrap();
-                    // End measuring and save elapsed.
-                    let elapsed = now.elapsed();
-                    println!("{}", link_asset.status().as_str());
-                    summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
-                    summary.lock().unwrap().count();
-                    static_assets.lock().unwrap().add(href.to_string());
+                        .send() {
+                        Ok(link_asset) => {
+                            // End measuring and save elapsed.
+                            let elapsed = now.elapsed();
+                            println!("{}", link_asset.status().as_str());
+                            summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                            summary.lock().unwrap().count();
+                            static_assets.lock().unwrap().add(href.to_string());
+                        }
+                        Err(e) => {
+                            println!("Request get error: {}", e.to_string());
+                        }
+                    };
                 }
             }
             _ => {
@@ -184,24 +201,33 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
     for img in html.select(&img_selector) {
         match img.value().attr("src") {
             Some(src) => {
-                if src.contains("http://") || src.contains("https://") || src.contains("//") {
-                    url = src.to_string();
+                if !src.contains("data:image/gif;base64") {
+                    if src.contains("http://") || src.contains("https://") || src.contains("//") {
+                        url = src.to_string();
+                    }
+                    else {
+                        url = base_url.to_string() + src;
+                    }
+                    println!("{}", url);
+                    // Start measuring time.
+                    let now = Instant::now();
+                    match Request::get(url)
+                        .redirect_policy(RedirectPolicy::Follow)
+                        .body(()).unwrap()
+                        .send() {
+                        Ok(img_asset) => {
+                            // End measuring and save elapsed.
+                            let elapsed = now.elapsed();
+                            println!("{}", img_asset.status().as_str());
+                            summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                            summary.lock().unwrap().count();
+                        }
+                        Err(e) => {
+                            println!("Request get error: {}", e.to_string());
+                        }
+                    };
+
                 }
-                else {
-                    url = base_url.to_string() + src;
-                }
-                println!("{}", url);
-                // Start measuring time.
-                let now = Instant::now();
-                let img_asset = Request::get(url)
-                    .redirect_policy(RedirectPolicy::Follow)
-                    .body(()).unwrap()
-                    .send().unwrap();
-                // End measuring and save elapsed.
-                let elapsed = now.elapsed();
-                println!("{}", img_asset.status().as_str());
-                summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
-                summary.lock().unwrap().count();
             }
             _ => {
                 // Do nothing if src is not found. Unlikely scenario.
@@ -220,15 +246,21 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
                 println!("{}", url);
                 // Start measuring time.
                 let now = Instant::now();
-                let img_asset = Request::get(url)
+                match Request::get(url)
                     .redirect_policy(RedirectPolicy::Follow)
                     .body(()).unwrap()
-                    .send().unwrap();
-                // End measuring and save elapsed.
-                let elapsed = now.elapsed();
-                println!("{}", img_asset.status().as_str());
-                summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
-                summary.lock().unwrap().count();
+                    .send() {
+                    Ok(script_asset) => {
+                        // End measuring and save elapsed.
+                        let elapsed = now.elapsed();
+                        println!("{}", script_asset.status().as_str());
+                        summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                        summary.lock().unwrap().count();
+                    }
+                    Err(e) => {
+                        println!("Request get error: {}", e.to_string());
+                    }
+                };
             }
             _ => {
                 // If src is not found,  do nothing. Some <script> tags don't have src.
