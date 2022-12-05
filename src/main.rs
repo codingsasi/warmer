@@ -164,7 +164,6 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
     for link in html.select(&links_selector) {
         match link.value().attr("href") {
             Some(href) => {
-                // Remove token
                 if !static_assets.lock().unwrap().contains(&href.to_string()) {
                     if href.contains("http://") || href.contains("https://") || href.contains("//") {
                         url = href.to_string();
@@ -201,7 +200,7 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
     for img in html.select(&img_selector) {
         match img.value().attr("src") {
             Some(src) => {
-                if !src.contains("data:image/gif;base64") {
+                if !static_assets.lock().unwrap().contains(&src.to_string()) && !src.contains("data:image/gif;base64") {
                     if src.contains("http://") || src.contains("https://") || src.contains("//") {
                         url = src.to_string();
                     }
@@ -221,6 +220,7 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
                             println!("{}", img_asset.status().as_str());
                             summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
                             summary.lock().unwrap().count();
+                            static_assets.lock().unwrap().add(src.to_string());
                         }
                         Err(e) => {
                             println!("Request get error: {}", e.to_string());
@@ -237,30 +237,33 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
     for script in html.select(&script_selector) {
         match script.value().attr("src") {
             Some(src) => {
-                if src.contains("http://") || src.contains("https://") || src.contains("//") {
-                    url = src.to_string();
-                }
-                else {
-                    url = base_url.to_string() + src;
-                }
-                println!("{}", url);
-                // Start measuring time.
-                let now = Instant::now();
-                match Request::get(url)
-                    .redirect_policy(RedirectPolicy::Follow)
-                    .body(()).unwrap()
-                    .send() {
-                    Ok(script_asset) => {
-                        // End measuring and save elapsed.
-                        let elapsed = now.elapsed();
-                        println!("{}", script_asset.status().as_str());
-                        summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
-                        summary.lock().unwrap().count();
+                if !static_assets.lock().unwrap().contains(&src.to_string()) {
+                    if src.contains("http://") || src.contains("https://") || src.contains("//") {
+                        url = src.to_string();
                     }
-                    Err(e) => {
-                        println!("Request get error: {}", e.to_string());
+                    else {
+                        url = base_url.to_string() + src;
                     }
-                };
+                    println!("{}", url);
+                    // Start measuring time.
+                    let now = Instant::now();
+                    match Request::get(url)
+                        .redirect_policy(RedirectPolicy::Follow)
+                        .body(()).unwrap()
+                        .send() {
+                        Ok(script_asset) => {
+                            // End measuring and save elapsed.
+                            let elapsed = now.elapsed();
+                            println!("{}", script_asset.status().as_str());
+                            summary.lock().unwrap().calc_response_time(elapsed.as_millis() as usize);
+                            summary.lock().unwrap().count();
+                            static_assets.lock().unwrap().add(src.to_string());
+                        }
+                        Err(e) => {
+                            println!("Request get error: {}", e.to_string());
+                        }
+                    };
+                }
             }
             _ => {
                 // If src is not found,  do nothing. Some <script> tags don't have src.
