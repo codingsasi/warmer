@@ -7,7 +7,9 @@ use isahc::{config::RedirectPolicy, prelude::*, Request};
 use clap::Parser;
 use ctrlc;
 use std::time::Instant;
+use isahc::config::SslOption;
 use scraper::{Html, Selector};
+use url::{Url};
 
 /// The struct to deserialize and hold the items in <url></url>
 /// in the sitemap.xml
@@ -18,7 +20,7 @@ use scraper::{Html, Selector};
 ///     <priority>1.0</priority>
 /// </url>
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct Url {
+struct Urlc {
     loc: String,
     #[serde(default = "default_lastmod")]
     lastmod: String,
@@ -31,7 +33,7 @@ struct Url {
 /// The struct to hold the urlset items in the sitemap.xml.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct UrlSet {
-    url: Vec<Url>
+    url: Vec<Urlc>
 }
 
 #[derive(Parser)]
@@ -108,6 +110,7 @@ fn main() {
     let base_url = args.url.to_owned();
     let sitemap_url = base_url.clone() + "/sitemap.xml";
     let mut response = Request::get(sitemap_url)
+        .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
         .redirect_policy(RedirectPolicy::Follow)
         .body(()).unwrap()
         .send().unwrap();
@@ -125,9 +128,11 @@ fn main() {
 fn load_pages(urlset: &UrlSet, args: &Cli, summary: Arc<Mutex<Summary>>, base_url: &String, static_assets: Arc<Mutex<Assets>>) {
     for url in urlset.url.iter() {
         println!("{:?}", url.loc);
+        let eurl = Url::parse(&url.loc).unwrap().to_string();
         // Start measuring time.
         let now = Instant::now();
-        let mut page = Request::get(&url.loc)
+        let mut page = Request::get(eurl)
+            .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
             .redirect_policy(RedirectPolicy::Follow)
             .body(()).unwrap()
             .send().unwrap();
@@ -165,16 +170,24 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
         match link.value().attr("href") {
             Some(href) => {
                 if !static_assets.lock().unwrap().contains(&href.to_string()) {
-                    if href.contains("http://") || href.contains("https://") || href.contains("//") {
+                    if href.contains("http://") || href.contains("https://") {
                         url = href.to_string();
                     }
+                    else if href.starts_with("//") {
+                        url = "https:".to_string() + &href.to_string();
+                    }
+                    else if href.starts_with("/") {
+                        url = base_url.to_string() + &href.to_string();
+                    }
                     else {
-                        url = base_url.to_string() + &href;
+                        url = "https://".to_string() + &href.to_string();
                     }
                     println!("{}", url);
                     // Start measuring time.
                     let now = Instant::now();
-                    match Request::get(url)
+                    let eurl = Url::parse(&url).unwrap().to_string();
+                    match Request::get(eurl)
+                        .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
                         .redirect_policy(RedirectPolicy::Follow)
                         .body(()).unwrap()
                         .send() {
@@ -200,17 +213,25 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
     for img in html.select(&img_selector) {
         match img.value().attr("src") {
             Some(src) => {
-                if !static_assets.lock().unwrap().contains(&src.to_string()) && !src.contains("data:image/gif;base64") {
-                    if src.contains("http://") || src.contains("https://") || src.contains("//") {
+                if !static_assets.lock().unwrap().contains(&src.to_string()) && !src.starts_with("data:image/") {
+                    if src.starts_with("http://") || src.starts_with("https://") {
                         url = src.to_string();
                     }
+                    else if src.contains("//") {
+                        url = "https:".to_string() + &src.to_string();
+                    }
+                    else if src.contains("/") {
+                        url = base_url.to_string() + &src.to_string();
+                    }
                     else {
-                        url = base_url.to_string() + src;
+                        url = "https://".to_string() + &src.to_string();
                     }
                     println!("{}", url);
                     // Start measuring time.
                     let now = Instant::now();
-                    match Request::get(url)
+                    let eurl = Url::parse(&url).unwrap().to_string();
+                    match Request::get(eurl)
+                        .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
                         .redirect_policy(RedirectPolicy::Follow)
                         .body(()).unwrap()
                         .send() {
@@ -223,7 +244,7 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
                             static_assets.lock().unwrap().add(src.to_string());
                         }
                         Err(e) => {
-                            println!("Request get error: {}", e.to_string());
+                            println!("Request get error2: {}", e.to_string());
                         }
                     };
 
@@ -238,16 +259,24 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
         match script.value().attr("src") {
             Some(src) => {
                 if !static_assets.lock().unwrap().contains(&src.to_string()) {
-                    if src.contains("http://") || src.contains("https://") || src.contains("//") {
+                    if src.starts_with("http://") || src.starts_with("https://") {
                         url = src.to_string();
                     }
+                    else if src.contains("//") {
+                        url = "https:".to_string() + &src.to_string();
+                    }
+                    else if src.contains("/") {
+                        url = base_url.to_string() + &src.to_string();
+                    }
                     else {
-                        url = base_url.to_string() + src;
+                        url = "https://".to_string() + &src.to_string();
                     }
                     println!("{}", url);
                     // Start measuring time.
                     let now = Instant::now();
-                    match Request::get(url)
+                    let eurl = Url::parse(&url).unwrap().to_string();
+                    match Request::get(eurl)
+                        .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
                         .redirect_policy(RedirectPolicy::Follow)
                         .body(()).unwrap()
                         .send() {
@@ -260,7 +289,7 @@ fn load_assets(body: String, summary: Arc<Mutex<Summary>>, base_url: &String, st
                             static_assets.lock().unwrap().add(src.to_string());
                         }
                         Err(e) => {
-                            println!("Request get error: {}", e.to_string());
+                            println!("Request get error3: {}", e.to_string());
                         }
                     };
                 }
