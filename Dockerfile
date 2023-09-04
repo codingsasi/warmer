@@ -1,10 +1,7 @@
-FROM rust:1.71
+FROM rust:1.71-alpine
 
 WORKDIR /usr/src/warmer
 
-COPY . .
-
-RUN cargo -V && cargo build --release \
-    && cp target/release/warmer /usr/bin/warmer
+COPY target/release/warmer /usr/bin/warmer
 
 CMD ["/usr/bin/warmer"]
