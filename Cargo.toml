@@ -1,9 +1,21 @@
 [package]
 name = "warmer"
 version = "0.1.0"
+authors = ["Abhai Sasidharan <mail@abh.ai>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "A lightweight CDN cache warmer. A sitemap.xml is required for this to work. See README on how to use."
+keywords = ["cache", "cdn", "cache-warmer"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/codingsasi/warmer"
+include = [
+    "/Cargo.toml",
+    "/Dockerfile",
+    "/LICENSE",
+    "/README.md",
+    "/src/**",
+    "/tests/**",
+]
+rust-version = "1.71"
 
 [dependencies]
 serde = { version = "1.0.147", features = ["derive"] }
