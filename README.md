@@ -56,8 +56,8 @@ warmer http(s)://someurl.com interl
 6. You may need to install `libudev-dev`, `libssl-dev`, `openssl`, `pkg-config`, `build-essential`.
 
 ### Running using docker
-1. docker pull abhaisasidharan/warmer:latest 
-2. docker run warmer -it warmer https://abh.ai 5
+1. docker pull abhaisasidharan/warmer 
+2. docker run abhaisasidharan/warmer -it warmer https://abh.ai 5
 
 ### Notes
 Large sitemaps, that include other zipped or gzipped sitemaps are not supported yet. I'll release that as and when I get time. But for most sitemaps this should warm it just fine.

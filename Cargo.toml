@@ -15,7 +15,7 @@ include = [
     "/src/**",
     "/tests/**",
 ]
-rust-version = "1.71"
+rust-version = "1.72"
 
 [dependencies]
 serde = { version = "1.0.147", features = ["derive"] }
