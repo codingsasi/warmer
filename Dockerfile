@@ -2,20 +2,24 @@ FROM rust:1.72-alpine
 
 WORKDIR /usr/src/warmer
 
-RUN apk update; \
-    apk upgrade;
-
-RUN apk add --no-cache \
+RUN apk update --no-cache; \
+    apk upgrade --no-cache; \
+    apk add --no-cache \
     openssl-dev \
     musl-dev \
     libgcc \
-    openssl-libs-static
+    openssl-libs-static \
+    git
 
-
-COPY . .
-
-RUN cargo -V && cargo build --release \
+RUN cd /usr/src/ && git clone https://github.com/codingsasi/warmer.git  \
+    && cd warmer && cargo build --release \
     && cp target/release/warmer /usr/bin/warmer \
-    && rm -rf /usr/src/warmer/*
+    && rm -rf /usr/src/warmer/* \
+    && apk add --no-cache \
+       openssl-dev \
+       musl-dev \
+       libgcc \
+       openssl-libs-static \
+       git
 
 CMD ["/usr/bin/warmer"]
