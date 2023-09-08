@@ -6,20 +6,11 @@ RUN apk update; \
     apk upgrade;
 
 RUN apk add --no-cache \
-    python3 \
-    python3-dev \
-    musl-dev \
-    openssl \
     openssl-dev \
-    libudev-zero \
-    build-base \
-    libc-dev \
-    pcc-libs-dev \
-    pkgconfig \
-    libc6-compat \
-    gcompat \
-    libxcb-dev \
-    libxkbcommon-dev
+    musl-dev \
+    libgcc \
+    openssl-libs-static
+
 
 COPY . .
 

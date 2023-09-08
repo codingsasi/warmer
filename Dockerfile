@@ -1,6 +1,16 @@
-FROM rust:1.72
+FROM rust:1.72-alpine
 
 WORKDIR /usr/src/warmer
+
+RUN apk update; \
+    apk upgrade;
+
+RUN apk add --no-cache \
+    openssl-dev \
+    musl-dev \
+    libgcc \
+    openssl-libs-static
+
 
 COPY . .
 
