@@ -337,6 +337,29 @@ fn extract_assets(html_content: &str, base_url: &str) -> Vec<String> {
     assets
 }
 
+/// Generate a random realistic user agent string
+fn get_random_user_agent() -> &'static str {
+    let user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0 +warmer (https://abh.ai/warmer)",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/129.0.0.0 +warmer (https://abh.ai/warmer)",
+        // Fallback simple user agents
+        "curl/7.68.0 +warmer (https://abh.ai/warmer)",
+        "wget/1.20.3 +warmer (https://abh.ai/warmer)",
+        "Python-urllib/3.8 +warmer (https://abh.ai/warmer)",
+    ];
+
+    let mut rng = rand::thread_rng();
+    user_agents[rng.gen_range(0..user_agents.len())]
+}
+
 /// Build full URL for asset
 fn build_asset_url(asset_path: &str, base_url: &str) -> Result<String, url::ParseError> {
     if asset_path.starts_with("http://") || asset_path.starts_with("https://") {
@@ -355,16 +378,11 @@ async fn make_request(url: &str, _verbose: bool) -> (u16, f64, u64, Option<Strin
     let start = Instant::now();
 
     let result = Request::get(url)
-        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+        .header("User-Agent", get_random_user_agent())
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .header("Accept-Language", "en-US,en;q=0.9")
-        .header("Accept-Encoding", "gzip, deflate, br")
+        .header("Accept-Encoding", "gzip, deflate")
         .header("Connection", "keep-alive")
-        .header("Upgrade-Insecure-Requests", "1")
-        .header("Sec-Fetch-Dest", "document")
-        .header("Sec-Fetch-Mode", "navigate")
-        .header("Sec-Fetch-Site", "none")
-        .header("Cache-Control", "max-age=0")
         .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
         .redirect_policy(RedirectPolicy::Follow)
         .body(())
@@ -377,26 +395,27 @@ async fn make_request(url: &str, _verbose: bool) -> (u16, f64, u64, Option<Strin
     match result {
         Ok(mut resp) => {
             let status_code = resp.status().as_u16();
-            let data_size = resp.headers()
-                .get("content-length")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-
             let parsed_url = Url::parse(url).unwrap_or_else(|_| Url::parse("http://localhost").unwrap());
             let path = parsed_url.path();
+
+            // Try to get HTML content for asset extraction and calculate actual data size
+            let (html_content, data_size) = if status_code == 200 {
+                match resp.text() {
+                    Ok(content) => {
+                        let actual_size = content.len() as u64;
+                        (Some(content), actual_size)
+                    }
+                    Err(_) => (None, 0)
+                }
+            } else {
+                (None, 0)
+            };
+
             if path.is_empty() {
                 print_transaction(status_code, response_time, data_size, "GET", "/", _verbose);
             } else {
                 print_transaction(status_code, response_time, data_size, "GET", path, _verbose);
             }
-
-            // Try to get HTML content for asset extraction
-            let html_content = if status_code == 200 {
-                resp.text().ok()
-            } else {
-                None
-            };
 
             (status_code, response_time, data_size, html_content)
         }
@@ -498,9 +517,10 @@ async fn run_user(
 
         request_count += 1;
 
-        // Delay between requests
+        // Delay between requests with some randomness
         if delay > 0 {
-            sleep(Duration::from_secs(delay)).await;
+            let random_delay = delay + rand::thread_rng().gen_range(0..=delay/2);
+            sleep(Duration::from_secs(random_delay)).await;
         }
     }
 }

@@ -45,6 +45,7 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 - **Internet Mode**: Random URL selection for realistic load testing
 - **Siege-like Output**: Colored status codes and comprehensive statistics
 - **Performance Metrics**: Transaction rate, throughput, response times, availability
+- **Cloudflare Bypass**: Rotating user agents and realistic request patterns to avoid bot detection
 
 ## Usage
 
