@@ -1,5 +1,5 @@
 # warmer
-A CDN cache warmer in rust for the sitemap.xml files that look like this:
+A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both sitemap-based cache warming and single URL load testing with concurrent request handling.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,17 +35,58 @@ A CDN cache warmer in rust for the sitemap.xml files that look like this:
 - https://www.axelerant.com/sitemap.xml
 - https://ffw.com/sitemap.xml
 
+## Features
+
+- **Concurrent Load Testing**: Multiple simultaneous users with configurable concurrency
+- **Time-based Testing**: Run tests for specific durations (seconds, minutes, hours)
+- **Sitemap Support**: Load test all URLs from a sitemap.xml
+- **Single URL Testing**: Test individual URLs like siege
+- **Asset Loading**: Automatically loads CSS, JS, and images from HTML pages
+- **Internet Mode**: Random URL selection for realistic load testing
+- **Siege-like Output**: Colored status codes and comprehensive statistics
+- **Performance Metrics**: Transaction rate, throughput, response times, availability
+
 ## Usage
 
-Download (from [here](https://github.com/codingsasi/warmer/releases)) and run the executable binary on linux with the following command
+### Command Line Options
+
+- `-c, --concurrent <NUM>`: Number of concurrent users (default: 25)
+- `-t, --time <TIME>`: Time to run the test (e.g., 5S, 1M, 1H)
+- `-r, --repetitions <NUM>`: Number of repetitions per user
+- `-d, --delay <SECONDS>`: Delay between requests (default: 1)
+- `-v, --verbose`: Verbose output
+- `--sitemap`: Use sitemap mode (default if no URL provided)
+- `-i, --internet`: Internet mode - random URL selection from sitemap
+- `--no-assets`: Disable static asset loading (CSS, JS, images) from HTML pages
+
+### Examples
+
+**Single URL load testing (like siege):**
+```bash
+./warmer https://abh.ai -t5S -c10
 ```
-warmer http(s)://someurl.com interl
- - ./warmer https://abh.ai 5
- - ./warmer https://abh.ai 1
+
+**Sitemap-based cache warming:**
+```bash
+./warmer https://example.com --sitemap -t1M -c25
 ```
-- The interval value should be specified in seconds, and it's how long the warmer waiting before loading the next URL in the sitemap.
-- The default interval is 5 seconds. No interval (0s) is allowed but use only if you want to DDOS your own site.
-- The complete url should be specified with scheme as well.
+
+**Internet mode with random URL selection:**
+```bash
+./warmer https://example.com --sitemap -i -t30S -c50
+```
+
+**Pure load testing without assets:**
+```bash
+./warmer https://abh.ai -t5S --no-assets
+```
+
+**Verbose mode with asset loading:**
+```bash
+./warmer https://abh.ai -t30S -c10 -v
+```
+
+## Installation
 
 ### Build from source
 1. Clone the repo
@@ -56,9 +97,38 @@ warmer http(s)://someurl.com interl
 6. You may need to install `libudev-dev`, `libssl-dev`, `openssl`, `pkg-config`, `build-essential`.
 
 ### Running using docker
-1. docker pull abhaisasidharan/warmer 
-2. docker run abhaisasidharan/warmer -it warmer https://abh.ai 5
+1. docker pull abhaisasidharan/warmer
+2. docker run abhaisasidharan/warmer -it warmer https://abh.ai -t5S -c10
 
-### Notes
-Large sitemaps, that include other zipped or gzipped sitemaps are not supported yet. I'll release that as and when I get time. But for most sitemaps this should warm it just fine.
-Currently on supported on 64-bit linux OS.
+## Output Example
+
+```
+** WARMER 0.1.2
+** Preparing 25 concurrent users for battle.
+The server is now under siege...
+HTTP/1.1 200     0.03 secs: 8971 bytes ==> GET  /
+HTTP/1.1 200     0.15 secs: 1585 bytes ==> GET  /menu/page.js
+HTTP/1.1 200     0.20 secs: 8423 bytes ==> GET  /s3fs-public/styles/max_325x325/public/2023-10/ubuntu-canonical.png
+...
+
+Lifting the server siege...
+
+Transactions:                475 hits
+Availability:             100.00 %
+Elapsed time:              19.59 secs
+Data transferred:           0.00 MB
+Response time:             38.21 ms
+Transaction rate:          24.25 trans/sec
+Throughput:                 0.00 MB/sec
+Concurrency:                0.93
+Successful transactions:      475
+Failed transactions:           0
+Longest transaction:      141.00 ms
+Shortest transaction:      26.00 ms
+```
+
+## Notes
+- Large sitemaps that include other zipped or gzipped sitemaps are not supported yet
+- Currently supported on 64-bit Linux OS
+- Asset loading is enabled by default for comprehensive cache warming
+- Use `--no-assets` for pure load testing without asset crawling
