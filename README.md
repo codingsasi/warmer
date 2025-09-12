@@ -37,12 +37,13 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 
 ## Features
 
-- **Concurrent Load Testing**: Multiple simultaneous users with configurable concurrency
+- **Parallel URL Processing**: Each thread processes different URLs from the sitemap in parallel
 - **Time-based Testing**: Run tests for specific durations (seconds, minutes, hours)
 - **Sitemap Support**: Load test all URLs from a sitemap.xml
 - **Single URL Testing**: Test individual URLs like siege
 - **Asset Loading**: Automatically loads CSS, JS, and images from HTML pages
 - **Internet Mode**: Random URL selection for realistic load testing
+- **Crawl Mode**: Process each URL only once, perfect for cache warming
 - **Siege-like Output**: Colored status codes and comprehensive statistics
 - **Performance Metrics**: Transaction rate, throughput, response times, availability
 - **Cloudflare Bypass**: Rotating user agents and realistic request patterns to avoid bot detection
@@ -56,9 +57,10 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 - `-r, --repetitions <NUM>`: Number of repetitions per user
 - `-d, --delay <SECONDS>`: Delay between requests (default: 1)
 - `-v, --verbose`: Verbose output
-- `--sitemap`: Use sitemap mode (default if no URL provided)
+- `--sitemap`: Use sitemap mode (default for all modes)
 - `-i, --internet`: Internet mode - random URL selection from sitemap
 - `--no-assets`: Disable static asset loading (CSS, JS, images) from HTML pages
+- `--crawl`: Crawl mode - process each URL only once, then stop (uses concurrency 1, automatically uses sitemap)
 
 ### Examples
 
@@ -75,6 +77,15 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 **Internet mode with random URL selection:**
 ```bash
 ./warmer https://example.com --sitemap -i -t30S -c50
+```
+
+**Crawl mode (cache warming - each URL once):**
+```bash
+# Crawl all URLs from sitemap once (automatically detects sitemap)
+./warmer https://example.com --crawl
+
+# Or explicitly specify sitemap URL
+./warmer https://example.com/sitemap.xml --crawl
 ```
 
 **Pure load testing without assets:**

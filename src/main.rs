@@ -71,6 +71,10 @@ struct Cli {
     /// Disable static asset loading (CSS, JS, images) from HTML pages
     #[arg(long = "no-assets")]
     no_assets: bool,
+
+    /// Crawl mode - go through each URL only once, then stop
+    #[arg(long = "crawl")]
+    crawl: bool,
 }
 
 /// Performance statistics tracking
@@ -222,20 +226,21 @@ fn print_header(concurrent: usize, _url: &str) {
     println!("The server is now under siege...");
 }
 
-/// Print siege-style transaction line
-fn print_transaction(status_code: u16, response_time: f64, data_size: u64, method: &str, path: &str, verbose: bool) {
+/// Print transaction details with optional highlighting for main URLs
+fn print_transaction(status_code: u16, response_time: f64, data_size: u64, method: &str, path: &str, _verbose: bool, is_main_url: bool) {
     let status_colored = color_status_code(status_code);
     let response_time_str = format_response_time(response_time);
     let data_size_str = format_data_size(data_size);
 
-    if verbose {
+    if is_main_url {
+        // Highlight main URLs with bold and bright colors
         println!(
             "HTTP/1.1 {}     {}: {} ==> {}  {}",
-            status_colored,
-            response_time_str,
-            data_size_str,
-            method,
-            path
+            status_colored.bold(),
+            response_time_str.bold(),
+            data_size_str.bold(),
+            method.bold(),
+            path.bold().bright_blue()
         );
     } else {
         println!(
@@ -291,7 +296,12 @@ async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error:
     let src = response.text()?;
     let us: UrlSet = from_str(&src)?;
 
-    Ok(us.url.into_iter().map(|u| u.loc).collect())
+    // Deduplicate URLs from sitemap
+    let mut urls: Vec<String> = us.url.into_iter().map(|u| u.loc).collect();
+    urls.sort();
+    urls.dedup();
+
+    Ok(urls)
 }
 
 /// Extract static assets from HTML content
@@ -360,6 +370,22 @@ fn get_random_user_agent() -> &'static str {
     user_agents[rng.gen_range(0..user_agents.len())]
 }
 
+/// Normalize URL for comparison (ignore http/https difference and trailing slashes)
+fn normalize_url(url: &str) -> String {
+    // Remove protocol (http:// or https://)
+    let without_protocol = url.replace("http://", "").replace("https://", "");
+
+    // Remove trailing slash if present
+    let mut normalized = without_protocol.trim_end_matches('/').to_string();
+
+    // Add domain if it's just a path
+    if !normalized.contains('.') && !normalized.is_empty() {
+        normalized = format!("abh.ai{}", if normalized.starts_with('/') { normalized } else { format!("/{}", normalized) });
+    }
+
+    normalized
+}
+
 /// Build full URL for asset
 fn build_asset_url(asset_path: &str, base_url: &str) -> Result<String, url::ParseError> {
     if asset_path.starts_with("http://") || asset_path.starts_with("https://") {
@@ -375,6 +401,11 @@ fn build_asset_url(asset_path: &str, base_url: &str) -> Result<String, url::Pars
 
 /// Make a single HTTP request with browser-like headers
 async fn make_request(url: &str, _verbose: bool) -> (u16, f64, u64, Option<String>) {
+    make_request_with_highlight(url, _verbose, false).await
+}
+
+/// Make a single HTTP request with optional highlighting
+async fn make_request_with_highlight(url: &str, _verbose: bool, is_main_url: bool) -> (u16, f64, u64, Option<String>) {
     let start = Instant::now();
 
     let result = Request::get(url)
@@ -412,23 +443,66 @@ async fn make_request(url: &str, _verbose: bool) -> (u16, f64, u64, Option<Strin
             };
 
             if path.is_empty() {
-                print_transaction(status_code, response_time, data_size, "GET", "/", _verbose);
+                print_transaction(status_code, response_time, data_size, "GET", "/", _verbose, is_main_url);
             } else {
-                print_transaction(status_code, response_time, data_size, "GET", path, _verbose);
+                print_transaction(status_code, response_time, data_size, "GET", path, _verbose, is_main_url);
             }
 
             (status_code, response_time, data_size, html_content)
         }
         Err(_) => {
-            print_transaction(0, response_time, 0, "GET", url, _verbose);
+            print_transaction(0, response_time, 0, "GET", url, _verbose, is_main_url);
             (0, response_time, 0, None)
         }
     }
 }
 
-/// Load static assets from a URL
-async fn load_assets_from_url(url: &str, base_url: &str, stats: Arc<Mutex<Stats>>, verbose: bool) {
-    let (status_code, response_time, data_size, html_content) = make_request(url, verbose).await;
+/// Crawl mode - process each URL only once
+async fn crawl_urls(
+    urls: Vec<String>,
+    stats: Arc<Mutex<Stats>>,
+    verbose: bool,
+    no_assets: bool,
+) {
+    let mut processed_urls = std::collections::HashSet::new();
+    let mut urls_to_process = urls;
+
+    while !urls_to_process.is_empty() {
+        let current_url = urls_to_process.remove(0);
+
+        // Skip if already processed
+        if processed_urls.contains(&current_url) {
+            continue;
+        }
+
+        processed_urls.insert(current_url.clone());
+
+        // Extract base URL for asset/link loading and preserve the protocol
+        let (base_url, protocol) = if let Ok(parsed_url) = Url::parse(&current_url) {
+            let scheme = parsed_url.scheme();
+            let host = parsed_url.host_str().unwrap_or("localhost");
+            (format!("{}://{}", scheme, host), scheme.to_string())
+        } else {
+            ("https://localhost".to_string(), "https".to_string())
+        };
+
+        if no_assets {
+            let (status_code, response_time, data_size, _) = make_request_with_highlight(&current_url, verbose, true).await;
+
+            // Update stats
+            {
+                let mut stats = stats.lock().unwrap();
+                stats.add_transaction(response_time, data_size, status_code);
+            }
+        } else {
+            load_assets_from_url(&current_url, &base_url, stats.clone(), verbose, true, &current_url, &protocol).await;
+        }
+    }
+}
+
+/// Load static assets from a URL with optional highlighting
+async fn load_assets_from_url(url: &str, base_url: &str, stats: Arc<Mutex<Stats>>, verbose: bool, is_main_url: bool, main_url: &str, protocol: &str) {
+    let (status_code, response_time, data_size, html_content) = make_request_with_highlight(url, verbose, is_main_url).await;
 
     // Update stats for the main request
     {
@@ -440,14 +514,27 @@ async fn load_assets_from_url(url: &str, base_url: &str, stats: Arc<Mutex<Stats>
     if let Some(html) = html_content {
         let assets = extract_assets(&html, base_url);
 
-        // Load each asset
-        for asset_url in assets {
-            let (asset_status, asset_response_time, asset_data_size, _) = make_request(&asset_url, verbose).await;
+        // Load each asset, but skip the main URL and respect protocol
+        for mut asset_url in assets {
+            // Normalize URLs for comparison (ignore http/https difference)
+            let is_same_url = normalize_url(&asset_url) == normalize_url(main_url);
 
-            // Update stats for the asset request
-            {
-                let mut stats = stats.lock().unwrap();
-                stats.add_transaction(asset_response_time, asset_data_size, asset_status);
+            // Skip if it's the main URL or if it's using a different protocol than requested
+            if !is_same_url {
+                // Enforce the same protocol as the main URL
+                if asset_url.starts_with("http://") && protocol == "https" {
+                    asset_url = asset_url.replace("http://", "https://");
+                } else if asset_url.starts_with("https://") && protocol == "http" {
+                    asset_url = asset_url.replace("https://", "http://");
+                }
+
+                let (asset_status, asset_time, asset_size, _) = make_request(&asset_url, verbose).await;
+
+                // Update stats for asset
+                {
+                    let mut stats = stats.lock().unwrap();
+                    stats.add_transaction(asset_time, asset_size, asset_status);
+                }
             }
         }
     }
@@ -463,10 +550,28 @@ async fn run_user(
     verbose: bool,
     internet_mode: bool,
     no_assets: bool,
+    thread_id: usize,
+    total_threads: usize,
 ) {
     let mut rng = std::collections::hash_map::DefaultHasher::new();
     let start_time = Instant::now();
     let mut request_count = 0;
+
+    // Calculate which URLs this thread should process
+    let urls_per_thread = if urls.len() < total_threads {
+        1 // If we have fewer URLs than threads, each thread gets at least one URL
+    } else {
+        urls.len() / total_threads + if urls.len() % total_threads > 0 { 1 } else { 0 }
+    };
+
+    // Calculate start and end indices for this thread's URL chunk
+    let start_idx = thread_id * urls_per_thread;
+    let end_idx = std::cmp::min(start_idx + urls_per_thread, urls.len());
+
+    // If this thread has no URLs to process (can happen if we have more threads than URLs)
+    if start_idx >= urls.len() {
+        return;
+    }
 
     loop {
         // Check if we should stop based on duration
@@ -484,27 +589,30 @@ async fn run_user(
         }
 
         // Select URL
-        let url = if internet_mode && urls.len() > 1 {
-            // Random selection for internet mode
+        let url = if internet_mode && (end_idx - start_idx) > 1 {
+            // Random selection for internet mode within this thread's chunk
             use std::hash::{Hash, Hasher};
             request_count.hash(&mut rng);
-            let idx = (rng.finish() as usize) % urls.len();
-            urls[idx].clone()
+            let offset = (rng.finish() as usize) % (end_idx - start_idx);
+            urls[start_idx + offset].clone()
         } else {
-            // Sequential selection
-            urls[request_count % urls.len()].clone()
+            // Sequential selection within this thread's chunk
+            let idx = start_idx + (request_count % (end_idx - start_idx));
+            urls[idx].clone()
         };
 
-        // Extract base URL for asset loading
-        let base_url = if let Ok(parsed_url) = Url::parse(&url) {
-            format!("{}://{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or("localhost"))
+        // Extract base URL for asset loading and preserve the protocol
+        let (base_url, protocol) = if let Ok(parsed_url) = Url::parse(&url) {
+            let scheme = parsed_url.scheme();
+            let host = parsed_url.host_str().unwrap_or("localhost");
+            (format!("{}://{}", scheme, host), scheme.to_string())
         } else {
-            "http://localhost".to_string()
+            ("https://localhost".to_string(), "https".to_string())
         };
 
         // Make request and load assets unless disabled
         if no_assets {
-            let (status_code, response_time, data_size, _) = make_request(&url, verbose).await;
+            let (status_code, response_time, data_size, _) = make_request_with_highlight(&url, verbose, true).await;
 
             // Update stats
             {
@@ -512,7 +620,7 @@ async fn run_user(
                 stats.add_transaction(response_time, data_size, status_code);
             }
         } else {
-            load_assets_from_url(&url, &base_url, stats.clone(), verbose).await;
+            load_assets_from_url(&url, &base_url, stats.clone(), verbose, true, &url, &protocol).await;
         }
 
         request_count += 1;
@@ -540,15 +648,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         exit(0);
     })?;
 
-    // Determine URLs to test
+    // Determine URLs to test - always use sitemap by default
     let urls = if let Some(url) = args.url {
-        if args.sitemap {
-            // Sitemap mode with provided base URL
-            load_sitemap(&url).await?
-        } else {
-            // Single URL mode
-            vec![url]
-        }
+        // Always use sitemap mode by default
+        load_sitemap(&url).await?
     } else {
         // Default to sitemap mode with localhost
         load_sitemap("http://localhost").await?
@@ -574,31 +677,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Print header
-    print_header(args.concurrent, &display_url);
-
-    // Spawn concurrent users
-    let mut handles = vec![];
-
-    for _ in 0..args.concurrent {
-        let urls = urls.clone();
-        let stats = stats.clone();
-        let repetitions = args.repetitions;
-        let duration = duration;
-        let delay = args.delay;
-        let verbose = args.verbose;
-        let internet_mode = args.internet;
-        let no_assets = args.no_assets;
-
-        let handle = tokio::spawn(async move {
-            run_user(urls, stats, repetitions, duration, delay, verbose, internet_mode, no_assets).await;
-        });
-
-        handles.push(handle);
+    if args.crawl {
+        println!("** WARMER 0.1.2");
+        println!("** Crawling mode - processing each URL only once");
+        println!("** The server is now under siege...");
+    } else {
+        print_header(args.concurrent, &display_url);
     }
 
-    // Wait for all users to complete
-    for handle in handles {
-        handle.await?;
+    // Handle crawl mode differently - no task spawning needed
+    if args.crawl {
+        // Crawl mode - process each URL only once, directly
+        crawl_urls((*urls).clone(), stats.clone(), args.verbose, args.no_assets).await;
+    } else {
+        // Normal load testing mode - spawn concurrent users
+        let mut handles = vec![];
+        let total_threads = args.concurrent;
+
+        for thread_id in 0..total_threads {
+            let urls = urls.clone();
+            let stats = stats.clone();
+            let repetitions = args.repetitions;
+            let duration = duration;
+            let delay = args.delay;
+            let verbose = args.verbose;
+            let internet_mode = args.internet;
+            let no_assets = args.no_assets;
+
+            let handle = tokio::spawn(async move {
+                run_user(urls, stats, repetitions, duration, delay, verbose, internet_mode, no_assets, thread_id, total_threads).await;
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all users to complete
+        for handle in handles {
+            handle.await?;
+        }
     }
 
     // Finish and print statistics
