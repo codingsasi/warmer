@@ -1016,9 +1016,26 @@ async fn run_user(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse command line arguments first
     let args = Cli::parse();
+
+    // Configure Tokio runtime with thread count based on concurrency
+    // Add some overhead for asset loading tasks
+    let worker_threads = args.concurrent * 2;
+
+    // Create and run the Tokio runtime with our custom configuration
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Run our async main function in the runtime
+    runtime.block_on(async_main(args))
+}
+
+async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup stats and signal handler
     let stats = Arc::new(Mutex::new(Stats::new()));

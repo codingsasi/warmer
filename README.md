@@ -37,7 +37,7 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 
 ## Features
 
-- **Parallel URL Processing**: Each thread processes different URLs from the sitemap in parallel
+- **Parallel URL Processing**: Each thread processes different URLs from the sitemap in parallel with dynamic thread pool scaling
 - **Time-based Testing**: Run tests for specific durations (seconds, minutes, hours)
 - **Advanced Sitemap Support**: Finds sitemap URLs from robots.txt and handles sitemap indexes
 - **Single URL Testing**: Test individual URLs like siege
