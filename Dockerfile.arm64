@@ -1,0 +1,14 @@
+FROM --platform=linux/arm64 rust:1.86
+
+WORKDIR /usr/src/warmer
+
+COPY . .
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && cargo build --release \
+    && cp target/release/warmer /usr/bin/warmer \
+    && rm -rf /usr/src/warmer/*
+
+CMD ["/usr/bin/warmer"]
