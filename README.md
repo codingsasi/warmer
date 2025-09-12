@@ -39,12 +39,13 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 
 - **Parallel URL Processing**: Each thread processes different URLs from the sitemap in parallel
 - **Time-based Testing**: Run tests for specific durations (seconds, minutes, hours)
-- **Sitemap Support**: Load test all URLs from a sitemap.xml
+- **Advanced Sitemap Support**: Finds sitemap URLs from robots.txt and handles sitemap indexes
 - **Single URL Testing**: Test individual URLs like siege
 - **Asset Loading**: Automatically loads CSS, JS, and images from HTML pages
 - **Internet Mode**: Random URL selection for realistic load testing
 - **Crawl Mode**: Process each URL only once, perfect for cache warming
-- **Siege-like Output**: Colored status codes and comprehensive statistics
+- **Follow Links Mode**: Automatically discover and test URLs by following links from the provided URL
+- **Siege-like Output**: Colored status codes, actual HTTP version, and comprehensive statistics
 - **Performance Metrics**: Transaction rate, throughput, response times, availability
 - **Cloudflare Bypass**: Rotating user agents and realistic request patterns to avoid bot detection
 
@@ -61,6 +62,7 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 - `-i, --internet`: Internet mode - random URL selection from sitemap
 - `--no-assets`: Disable static asset loading (CSS, JS, images) from HTML pages
 - `--crawl`: Crawl mode - process each URL only once, then stop (uses concurrency 1, automatically uses sitemap)
+- `--follow-links`: Follow links mode - discover URLs by following links from the provided URL (bypasses sitemap processing)
 
 ### Examples
 
@@ -98,6 +100,11 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 ./warmer https://abh.ai -t30S -c10 -v
 ```
 
+**Follow links mode (for sites without sitemap.xml):**
+```bash
+./warmer https://www.tdtreedays.com --follow-links
+```
+
 ## Installation
 
 ### Build from source
@@ -118,9 +125,9 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 ** WARMER 0.1.2
 ** Preparing 25 concurrent users for battle.
 The server is now under siege...
-HTTP/1.1 200     0.03 secs: 8971 bytes ==> GET  /
+HTTP/2.0 200     0.03 secs: 8971 bytes ==> GET  /
 HTTP/1.1 200     0.15 secs: 1585 bytes ==> GET  /menu/page.js
-HTTP/1.1 200     0.20 secs: 8423 bytes ==> GET  /s3fs-public/styles/max_325x325/public/2023-10/ubuntu-canonical.png
+HTTP/2.0 200     0.20 secs: 8423 bytes ==> GET  /s3fs-public/styles/max_325x325/public/2023-10/ubuntu-canonical.png
 ...
 
 Lifting the server siege...
@@ -144,3 +151,5 @@ Shortest transaction:      26.00 ms
 - Currently supported on 64-bit Linux OS
 - Asset loading is enabled by default for comprehensive cache warming
 - Use `--no-assets` for pure load testing without asset crawling
+- The tool automatically checks robots.txt to find the correct sitemap URL
+- Sitemap indexes (XML files containing links to other sitemaps) are fully supported and recursively processed
