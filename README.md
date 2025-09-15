@@ -117,7 +117,7 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 
 ### Running using docker
 1. docker pull abhaisasidharan/warmer
-2. docker run abhaisasidharan/warmer -it warmer https://abh.ai -t5S -c10
+2. docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
 
 ## Output Example
 
