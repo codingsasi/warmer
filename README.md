@@ -1,5 +1,21 @@
 # warmer
-A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both sitemap-based cache warming and single URL load testing with concurrent request handling.
+A modern HTTP load testing and CDN cache warming tool in Rust. Inspired by tools like siege and wrk, warmer provides advanced features including sitemap-based cache warming, JavaScript site crawling, and comprehensive asset discovery with concurrent request handling.
+
+## Quick Start
+
+```bash
+# Pull and run warmer with Docker (works on x86_64 and ARM64)
+docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+
+# For JavaScript/WASM sites
+docker run abhaisasidharan/warmer warmer https://example-spa.com -j
+
+# For sitemap-based cache warming
+docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
+
+# For ARM64 (Apple Silicon, ARM servers)
+docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+```
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,79 +74,162 @@ A siege-like HTTP load testing and CDN cache warming tool in Rust. Supports both
 - `-r, --repetitions <NUM>`: Number of repetitions per user
 - `-d, --delay <SECONDS>`: Delay between requests (default: 1)
 - `-v, --verbose`: Verbose output
-- `--sitemap`: Use sitemap mode (default for all modes)
+- `-s, --sitemap`: Use sitemap mode (default for all modes)
 - `-i, --internet`: Internet mode - random URL selection from sitemap
-- `--no-assets`: Disable static asset loading (CSS, JS, images) from HTML pages
-- `--crawl`: Crawl mode - process each URL only once, then stop (uses concurrency 1, automatically uses sitemap)
-- `--follow-links`: Follow links mode - discover URLs by following links from the provided URL (bypasses sitemap processing)
+- `-n, --no-assets`: Disable static asset loading (CSS, JS, images) from HTML pages
+- `-w, --crawl`: Crawl mode - process each URL only once, then stop (uses concurrency 1, automatically uses sitemap)
+- `-f, --follow-links`: Follow links mode - discover URLs by following links from the provided URL (bypasses sitemap processing)
+- `-j, --js`: JavaScript mode - use headless Chrome browser to crawl JavaScript/WASM sites and discover dynamically generated links (automatically disables sitemap mode)
+- `-T, --discovery-threads <NUM>`: Number of discovery threads for JavaScript mode (default: CPU cores / 2, min 2, max 8)
 
 ### Examples
 
-**Single URL load testing (like siege):**
+**Single URL load testing:**
 ```bash
-./warmer https://abh.ai -t5S -c10
+docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
 ```
 
 **Sitemap-based cache warming:**
 ```bash
-./warmer https://example.com --sitemap -t1M -c25
+docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
 ```
 
 **Internet mode with random URL selection:**
 ```bash
-./warmer https://example.com --sitemap -i -t30S -c50
+docker run abhaisasidharan/warmer warmer https://example.com -s -i -t30S -c50
 ```
 
 **Crawl mode (cache warming - each URL once):**
 ```bash
 # Crawl all URLs from sitemap once (automatically detects sitemap)
-./warmer https://example.com --crawl
+docker run abhaisasidharan/warmer warmer https://example.com -w
 
 # Or explicitly specify sitemap URL
-./warmer https://example.com/sitemap.xml --crawl
+docker run abhaisasidharan/warmer warmer https://example.com/sitemap.xml -w
 ```
 
 **Pure load testing without assets:**
 ```bash
-./warmer https://abh.ai -t5S --no-assets
+docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -n
 ```
 
 **Verbose mode with asset loading:**
 ```bash
-./warmer https://abh.ai -t30S -c10 -v
+docker run abhaisasidharan/warmer warmer https://abh.ai -t30S -c10 -v
 ```
 
 **Follow links mode (for sites without sitemap.xml):**
 ```bash
-./warmer https://www.tdtreedays.com --follow-links
+docker run abhaisasidharan/warmer warmer https://www.tdtreedays.com -f
+```
+
+**JavaScript mode (for JS/WASM sites):**
+```bash
+docker run abhaisasidharan/warmer warmer https://example-spa.com -j
+```
+
+**JavaScript mode with custom thread count:**
+```bash
+docker run abhaisasidharan/warmer warmer https://example-spa.com -j -T4
+```
+
+**Sitemap mode (XML parsing only):**
+```bash
+docker run abhaisasidharan/warmer warmer https://example.com -s
 ```
 
 ## Installation
 
-### Build from source
-1. Clone the repo
-2. cd warmer
-3. Install cargo https://doc.rust-lang.org/cargo/getting-started/installation.html
-4. cargo build --release
-5. The binary will be in the target/release folder. It will also be named `warmer`
-6. You may need to install `libudev-dev`, `libssl-dev`, `openssl`, `pkg-config`, `build-essential`.
+### Docker (Recommended)
+The easiest way to run warmer is using Docker:
 
-### Running using docker
-1. docker pull abhaisasidharan/warmer
-2. docker run abhaisasidharan/warmer -it warmer https://abh.ai -t5S -c10
+#### x86_64 (Intel/AMD)
+```bash
+# Pull the latest image
+docker pull abhaisasidharan/warmer
+
+# Run warmer with any URL
+docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+
+# Run with JavaScript mode
+docker run abhaisasidharan/warmer warmer https://example.com -j -T4
+
+# Run with sitemap mode
+docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
+```
+
+#### ARM64 (Apple Silicon, ARM servers)
+```bash
+# Pull the ARM64 image
+docker pull --platform linux/arm64 abhaisasidharan/warmer
+
+# Run warmer on ARM64
+docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+
+# Run with JavaScript mode on ARM64
+docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://example.com -j -T4
+```
+
+#### Multi-architecture (Automatic)
+```bash
+# Docker will automatically select the correct architecture
+docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+```
+
+### Build Custom Docker Images (Advanced)
+If you want to build Docker images for specific architectures:
+
+#### Build for x86_64
+```bash
+# Build the standard image
+docker build -t warmer:latest .
+
+# Run the custom build
+docker run warmer:latest warmer https://abh.ai -t5S -c10
+```
+
+#### Build for ARM64
+```bash
+# Build for ARM64 architecture
+docker build -f Dockerfile.arm64 -t warmer:arm64 .
+
+# Run on ARM64
+docker run --platform linux/arm64 warmer:arm64 warmer https://abh.ai -t5S -c10
+```
+
+#### Build Multi-architecture Images
+```bash
+# Create a builder instance
+docker buildx create --name warmer-builder --use
+
+# Build for multiple architectures
+docker buildx build --platform linux/amd64,linux/arm64 -t abhaisasidharan/warmer:latest --push .
+
+# Or build locally without pushing
+docker buildx build --platform linux/amd64,linux/arm64 -t warmer:multi-arch .
+```
+
+### Build from source (Advanced)
+If you prefer to build from source:
+
+1. Clone the repo: `git clone <repo-url> && cd warmer`
+2. Install Rust: https://doc.rust-lang.org/cargo/getting-started/installation.html
+3. Build: `cargo build --release`
+4. The binary will be in `target/release/warmer`
+5. You may need to install: `libudev-dev`, `libssl-dev`, `openssl`, `pkg-config`, `build-essential`
 
 ## Output Example
 
 ```
 ** WARMER 0.1.2
 ** Preparing 25 concurrent users for battle.
-The server is now under siege...
+The server is now under load...
 HTTP/2.0 200     0.03 secs: 8971 bytes ==> GET  /
 HTTP/1.1 200     0.15 secs: 1585 bytes ==> GET  /menu/page.js
 HTTP/2.0 200     0.20 secs: 8423 bytes ==> GET  /s3fs-public/styles/max_325x325/public/2023-10/ubuntu-canonical.png
 ...
 
-Lifting the server siege...
+Load testing completed...
 
 Transactions:                475 hits
 Availability:             100.00 %
@@ -147,9 +246,12 @@ Shortest transaction:      26.00 ms
 ```
 
 ## Notes
+- **Docker Required**: The recommended way to run warmer is using Docker. No local installation needed!
+- **Multi-architecture Support**: Works on x86_64 (Intel/AMD) and ARM64 (Apple Silicon, ARM servers)
 - Large sitemaps that include other zipped or gzipped sitemaps are not supported yet
-- Currently supported on 64-bit Linux OS
 - Asset loading is enabled by default for comprehensive cache warming
-- Use `--no-assets` for pure load testing without asset crawling
+- Use `-n, --no-assets` for pure load testing without asset crawling
 - The tool automatically checks robots.txt to find the correct sitemap URL
 - Sitemap indexes (XML files containing links to other sitemaps) are fully supported and recursively processed
+- JavaScript mode uses multiple headless Chrome instances for parallel discovery - use `-T, --discovery-threads` to control memory usage
+- Cross-platform: Works on Linux, macOS, and Windows with Docker

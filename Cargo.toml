@@ -1,8 +1,8 @@
 [package]
 name = "warmer"
-version = "0.1.6"
+version = "0.1.7"
 authors = ["Abhai Sasidharan <mail@abh.ai>"]
-edition = "2021"
+edition = "2024"
 description = "A lightweight CDN cache warmer. A sitemap.xml is required for this to work. See README on how to use."
 keywords = ["cache", "cdn", "cache-warmer"]
 license = "GPL-2.0-only"
@@ -15,10 +15,11 @@ include = [
     "/src/**",
     "/tests/**",
 ]
-rust-version = "1.86"
+rust-version = "1.90"
 
 [dependencies]
 serde = { version = "1.0.147", features = ["derive"] }
+serde_json = "1.0"
 serde-xml-rs = "0.8.1"
 isahc = "1.7.2"
 clap = { version = "4.0.18", features = ["derive"] }
@@ -29,3 +30,5 @@ tokio = { version = "1.0", features = ["full"] }
 colored = "3.0"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"
+headless_chrome = "1.0.18"
+num_cpus = "1.0"

@@ -1,4 +1,4 @@
-FROM rust:1.86-alpine
+FROM rust:1.90-alpine
 
 WORKDIR /usr/src/warmer
 

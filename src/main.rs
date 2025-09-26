@@ -14,6 +14,7 @@ use tokio::time::sleep;
 use colored::*;
 use scraper::{Html, Selector};
 use rand::Rng;
+mod js_crawler;
 
 /// The struct to deserialize and hold the items in <url></url>
 /// in the sitemap.xml
@@ -36,7 +37,7 @@ struct UrlSet {
 
 #[derive(Parser)]
 #[command(name = "warmer")]
-#[command(about = "A siege-like HTTP load testing and cache warming tool")]
+#[command(about = "A modern HTTP load testing and cache warming tool")]
 struct Cli {
     /// URL to test (single URL mode) or base URL for sitemap mode
     url: Option<String>,
@@ -62,7 +63,7 @@ struct Cli {
     verbose: bool,
 
     /// Use sitemap mode (default if no URL provided)
-    #[arg(long = "sitemap")]
+    #[arg(short = 's', long = "sitemap")]
     sitemap: bool,
 
     /// Internet mode - random URL selection from sitemap
@@ -70,16 +71,24 @@ struct Cli {
     internet: bool,
 
     /// Disable static asset loading (CSS, JS, images) from HTML pages
-    #[arg(long = "no-assets")]
+    #[arg(short = 'n', long = "no-assets")]
     no_assets: bool,
 
     /// Crawl mode - go through each URL only once, then stop
-    #[arg(long = "crawl")]
+    #[arg(short = 'w', long = "crawl")]
     crawl: bool,
 
     /// Follow links mode - extract and follow links from pages when sitemap.xml is not found
-    #[arg(long = "follow-links")]
+    #[arg(short = 'f', long = "follow-links")]
     follow_links: bool,
+
+    /// JavaScript mode - use headless Chrome browser to crawl JS/WASM sites
+    #[arg(short = 'j', long = "js")]
+    js_mode: bool,
+
+    /// Number of discovery threads for JavaScript mode (default: CPU cores / 2)
+    #[arg(short = 'T', long = "discovery-threads")]
+    discovery_threads: Option<usize>,
 }
 
 /// Performance statistics tracking
@@ -197,7 +206,7 @@ fn parse_duration(time_str: &str) -> Result<Duration, String> {
     }
 }
 
-/// Color status codes like siege
+/// Color status codes for better readability
 fn color_status_code(status_code: u16) -> ColoredString {
     match status_code {
         200..=299 => status_code.to_string().green(),
@@ -208,12 +217,12 @@ fn color_status_code(status_code: u16) -> ColoredString {
     }
 }
 
-/// Format response time like siege
+/// Format response time for display
 fn format_response_time(ms: f64) -> String {
     format!("{:.2} secs", ms / 1000.0)
 }
 
-/// Format data size like siege
+/// Format data size for display
 fn format_data_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} bytes", bytes)
@@ -224,11 +233,11 @@ fn format_data_size(bytes: u64) -> String {
     }
 }
 
-/// Print siege-style header
+/// Print load testing header
 fn print_header(concurrent: usize, _url: &str) {
     println!("** WARMER 0.1.2");
     println!("** Preparing {} concurrent users for battle.", concurrent);
-    println!("The server is now under siege...");
+    println!("The server is now under load...");
 }
 
 /// Print transaction details with optional highlighting for main URLs
@@ -261,9 +270,9 @@ fn print_transaction(status_code: u16, response_time: f64, data_size: u64, metho
     }
 }
 
-/// Print final statistics like siege
+/// Print final statistics
 fn print_statistics(stats: &Stats) {
-    println!("\nLifting the server siege...");
+    println!("\nLoad testing completed...");
     println!();
     println!("Transactions:\t\t{:8} hits", stats.transactions);
     println!("Availability:\t\t{:8.2} %", stats.availability());
@@ -401,7 +410,45 @@ async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error:
         }
 
         any_sitemap_found = true;
-        let content = response.text()?;
+        let mut content = response.text()?;
+
+        // Check if we got HTML instead of XML
+        if content.trim_start().to_lowercase().starts_with("<!doctype") ||
+           content.trim_start().to_lowercase().starts_with("<html") {
+            println!("Sitemap URL returned HTML instead of XML, trying alternative approaches...");
+
+            // Try the direct sitemap.xml path
+            let direct_sitemap_url = format!("{}/sitemap.xml", base_url);
+            if direct_sitemap_url != current_sitemap_url {
+                println!("Trying direct sitemap path: {}", direct_sitemap_url);
+                sitemap_urls_to_process.push(direct_sitemap_url);
+            }
+
+            // Also try some common sitemap variations
+            let variations = vec![
+                format!("{}/sitemap_index.xml", base_url),
+                format!("{}/sitemaps.xml", base_url),
+                format!("{}/sitemap-0.xml", base_url),
+            ];
+
+            for variation in variations {
+                sitemap_urls_to_process.push(variation);
+            }
+            continue;
+        }
+
+        // Clean up the content to handle XML declarations and BOMs
+        content = content.trim_start().to_string();
+        if content.starts_with('\u{feff}') {
+            content = content[3..].to_string(); // Remove BOM
+        }
+
+        // Remove XML declaration if present
+        if content.starts_with("<?xml") {
+            if let Some(end) = content.find("?>") {
+                content = content[end + 2..].trim_start().to_string();
+            }
+        }
 
         // Try to parse as sitemap index first
         match parse_sitemap_index(&content).await {
@@ -421,6 +468,13 @@ async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error:
                     },
                     Err(e) => {
                         println!("Error parsing sitemap: {}", e);
+                        // Try to debug by showing first few characters
+                        let preview = if content.len() > 100 {
+                            &content[..100]
+                        } else {
+                            &content
+                        };
+                        println!("Content preview: {}", preview);
                     }
                 }
             }
@@ -627,6 +681,11 @@ async fn follow_links_from_url(start_url: &str, concurrency: usize, stats: Arc<M
 
     println!("Discovered {} URLs by following links", final_urls.len());
     Ok(final_urls)
+}
+
+/// Crawl JavaScript/WASM sites using headless Chrome browser
+async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex<Stats>>, discovery_threads: Option<usize>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    js_crawler::crawl_js_site(start_url, concurrency, stats, discovery_threads).await
 }
 
 /// Extract static assets from HTML content
@@ -1048,9 +1107,19 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         exit(0);
     })?;
 
-    // Determine URLs to test - use follow-links directly if enabled, otherwise use sitemap
+    // Determine URLs to test - use JS mode, follow-links, or sitemap
     let urls = if let Some(url) = args.url.clone() {
-        if args.follow_links {
+        if args.js_mode {
+            // If JS mode is enabled, use headless Chrome to crawl JavaScript/WASM sites
+            // JS mode automatically disables sitemap mode
+            match crawl_js_site(&url, args.concurrent, stats.clone(), args.discovery_threads).await {
+                Ok(discovered_urls) => discovered_urls,
+                Err(js_err) => {
+                    eprintln!("Failed to crawl JavaScript site: {}", js_err);
+                    return Ok(());
+                }
+            }
+        } else if args.follow_links {
             // If follow-links is enabled, bypass sitemap processing entirely
             // Note: We don't need to load URLs in follow-links mode since we do the loading during discovery
             match follow_links_from_url(&url, args.concurrent, stats.clone()).await {
@@ -1065,14 +1134,22 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             match load_sitemap(&url).await {
                 Ok(sitemap_urls) => sitemap_urls,
                 Err(e) => {
-                    eprintln!("Failed to load sitemap: {}. Try using --follow-links option.", e);
+                    eprintln!("Failed to load sitemap: {}. Try using --follow-links or --js option.", e);
                     return Ok(());
                 }
             }
         }
     } else {
-        // Default to sitemap mode with localhost, or follow-links if enabled
-        if args.follow_links {
+        // Default to sitemap mode with localhost, or follow-links/JS if enabled
+        if args.js_mode {
+            match crawl_js_site("http://localhost", args.concurrent, stats.clone(), args.discovery_threads).await {
+                Ok(discovered_urls) => discovered_urls,
+                Err(_) => {
+                    eprintln!("Failed to crawl JavaScript site from localhost");
+                    return Ok(());
+                }
+            }
+        } else if args.follow_links {
             match follow_links_from_url("http://localhost", args.concurrent, stats.clone()).await {
                 Ok(discovered_urls) => discovered_urls,
                 Err(_) => {
@@ -1084,7 +1161,7 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             match load_sitemap("http://localhost").await {
                 Ok(sitemap_urls) => sitemap_urls,
                 Err(_) => {
-                    eprintln!("Failed to load sitemap from localhost. Try using --follow-links option.");
+                    eprintln!("Failed to load sitemap from localhost. Try using --follow-links or --js option.");
                     return Ok(());
                 }
             }
@@ -1114,7 +1191,12 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if args.crawl {
         println!("** WARMER 0.1.2");
         println!("** Crawling mode - processing each URL only once");
-        println!("** The server is now under siege...");
+        println!("** The server is now under load...");
+    } else if args.js_mode {
+        println!("** WARMER 0.1.2");
+        println!("** JavaScript mode - using headless Chrome browser to crawl JS/WASM sites");
+        println!("** Preparing {} concurrent users for battle.", args.concurrent);
+        println!("The server is now under load...");
     } else {
         print_header(args.concurrent, &display_url);
     }
@@ -1123,8 +1205,8 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if args.crawl {
         // Crawl mode - process each URL only once, directly
         crawl_urls((*urls).clone(), stats.clone(), args.verbose, args.no_assets).await;
-    } else if args.follow_links {
-        // Follow-links mode already loaded the URLs during discovery, so we're done
+    } else if args.js_mode || args.follow_links {
+        // JS mode and follow-links mode already loaded the URLs during discovery, so we're done
         // Just wait a moment to ensure all stats are properly recorded
         sleep(Duration::from_millis(100)).await;
     } else {
