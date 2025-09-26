@@ -1,6 +1,6 @@
 [package]
 name = "warmer"
-version = "0.1.7"
+version = "0.1.8"
 authors = ["Abhai Sasidharan <mail@abh.ai>"]
 edition = "2024"
 description = "A lightweight CDN cache warmer. A sitemap.xml is required for this to work. See README on how to use."
