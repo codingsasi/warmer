@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 rust:1.86
+FROM --platform=linux/arm64 rust:1.90
 
 WORKDIR /usr/src/warmer
 
