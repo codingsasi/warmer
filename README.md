@@ -5,16 +5,13 @@ A modern HTTP load testing and CDN cache warming tool in Rust. Inspired by tools
 
 ```bash
 # Pull and run warmer with Docker (works on x86_64 and ARM64)
-docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+docker run abhaisasidharan/warmer warmer https://example.com -t5S -c10
 
 # For JavaScript/WASM sites
 docker run abhaisasidharan/warmer warmer https://example-spa.com -j
 
 # For sitemap-based cache warming
 docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
-
-# For ARM64 (Apple Silicon, ARM servers)
-docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
 ```
 
 ### For Developers
@@ -29,40 +26,6 @@ docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -
 # Build locally for testing
 ./build-docker.sh v1.0.0 --local
 ```
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<?xml-stylesheet type="text/xsl" href="/sitemap.xsl"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
-<url>
-    <loc>https://abh.ai/</loc>
-    <lastmod>2022-06-25T20:46Z</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-</url>
-<url>
-    <loc>https://abh.ai/photos/nature</loc>
-    <lastmod>2022-09-25T05:33Z</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.7</priority>
-</url>
-<url>
-    <loc>https://abh.ai/portraits</loc>
-    <lastmod>2022-09-24T18:42Z</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.7</priority>
-</url>
-</urlset>
-```
-
-## Other examples of sitemaps that work
-
-- https://abh.ai/sitemap.xml
-- https://qed42.com/sitemap.xml
-- https://www.australia.gov.au/sitemap.xml
-- https://www.alkhaleej.ae/sitemap.xml?page=1
-- https://www.axelerant.com/sitemap.xml
-- https://ffw.com/sitemap.xml
 
 ## Features
 
@@ -99,7 +62,7 @@ docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -
 
 **Single URL load testing:**
 ```bash
-docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
+docker run abhaisasidharan/warmer warmer https://example.com -t5S -c10
 ```
 
 **Sitemap-based cache warming:**
@@ -156,7 +119,6 @@ docker run abhaisasidharan/warmer warmer https://example.com -s
 ### Docker (Recommended)
 The easiest way to run warmer is using Docker:
 
-#### x86_64 (Intel/AMD)
 ```bash
 # Pull the latest image
 docker pull abhaisasidharan/warmer
@@ -171,28 +133,10 @@ docker run abhaisasidharan/warmer warmer https://example.com -j -T4
 docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
 ```
 
-#### ARM64 (Apple Silicon, ARM servers)
-```bash
-# Pull the ARM64 image
-docker pull --platform linux/arm64 abhaisasidharan/warmer
-
-# Run warmer on ARM64
-docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
-
-# Run with JavaScript mode on ARM64
-docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://example.com -j -T4
-```
-
-#### Multi-architecture (Automatic)
-```bash
-# Docker will automatically select the correct architecture
-docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
-```
-
 ### Build from source
 If you prefer to build from source:
 
-1. Clone the repo: `git clone <repo-url> && cd warmer`
+1. Clone the repo: `git clone https://github.com/codingsasi/warmer.git && cd warmer`
 2. Install Rust: https://doc.rust-lang.org/cargo/getting-started/installation.html
 3. Build: `cargo build --release`
 4. The binary will be in `target/release/warmer`
@@ -201,7 +145,7 @@ If you prefer to build from source:
 ## Output Example
 
 ```
-** WARMER 0.1.2
+** WARMER 0.1.8
 ** Preparing 25 concurrent users for battle.
 The server is now under load...
 HTTP/2.0 200     0.03 secs: 8971 bytes ==> GET  /

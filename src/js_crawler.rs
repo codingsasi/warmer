@@ -82,12 +82,8 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
         tab.navigate_to(url)?;
         tab.wait_until_navigated()?;
 
-        // Wait for dynamic content to load
-        std::thread::sleep(std::time::Duration::from_millis(3000));
-
         // Extract links
         let links_result = tab.evaluate(links_js, true)?;
-        // println!("Links evaluation result: {:?}", links_result);
 
         let page_links: Vec<String> = match links_result.value {
             Some(value) => {
@@ -100,7 +96,6 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
             None => {
                 println!("No links value, checking preview...");
                 if let Some(preview) = &links_result.preview {
-                    // println!("Links preview: {:?}", preview);
                     let mut links = Vec::new();
                     for prop in &preview.properties {
                         if let Some(value) = &prop.value {
