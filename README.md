@@ -17,6 +17,19 @@ docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
 docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
 ```
 
+### For Developers
+
+```bash
+# Build and push latest version (both architectures)
+./build-docker.sh
+
+# Build specific version
+./build-docker.sh v1.0.0
+
+# Build locally for testing
+./build-docker.sh v1.0.0 --local
+```
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="/sitemap.xsl"?>
@@ -176,40 +189,7 @@ docker run --platform linux/arm64 abhaisasidharan/warmer warmer https://example.
 docker run abhaisasidharan/warmer warmer https://abh.ai -t5S -c10
 ```
 
-### Build Custom Docker Images (Advanced)
-If you want to build Docker images for specific architectures:
-
-#### Build for x86_64
-```bash
-# Build the standard image
-docker build -t warmer:latest .
-
-# Run the custom build
-docker run warmer:latest warmer https://abh.ai -t5S -c10
-```
-
-#### Build for ARM64
-```bash
-# Build for ARM64 architecture
-docker build -f Dockerfile.arm64 -t warmer:arm64 .
-
-# Run on ARM64
-docker run --platform linux/arm64 warmer:arm64 warmer https://abh.ai -t5S -c10
-```
-
-#### Build Multi-architecture Images
-```bash
-# Create a builder instance
-docker buildx create --name warmer-builder --use
-
-# Build for multiple architectures
-docker buildx build --platform linux/amd64,linux/arm64 -t abhaisasidharan/warmer:latest --push .
-
-# Or build locally without pushing
-docker buildx build --platform linux/amd64,linux/arm64 -t warmer:multi-arch .
-```
-
-### Build from source (Advanced)
+### Build from source
 If you prefer to build from source:
 
 1. Clone the repo: `git clone <repo-url> && cd warmer`
