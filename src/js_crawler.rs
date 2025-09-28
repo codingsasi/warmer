@@ -1,4 +1,4 @@
-use headless_chrome::Browser;
+use headless_chrome::{Browser, LaunchOptions};
 use isahc::{prelude::*, config::{SslOption, RedirectPolicy}, Request};
 use serde_json;
 use std::sync::{Arc, Mutex};
@@ -249,7 +249,12 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
 
         let handle = std::thread::spawn(move || {
             // Each thread gets its own browser instance
-            let browser = match Browser::default() {
+            // Configure browser for Docker environment (disable sandbox when running as root)
+            let launch_options = LaunchOptions {
+                sandbox: false,
+                ..Default::default()
+            };
+            let browser = match Browser::new(launch_options) {
                 Ok(browser) => {
                     browser
                 },

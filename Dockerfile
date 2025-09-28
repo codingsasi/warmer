@@ -9,10 +9,26 @@ RUN apk update --no-cache; \
     musl-dev \
     libgcc \
     openssl-libs-static \
-    git
+    zlib-dev \
+    zlib-static \
+    git \
+    # Chrome dependencies
+    chromium \
+    nss \
+    freetype \
+    freetype-dev \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont \
+    # Set environment variables for Chrome
+    && export CHROME_BIN=/usr/bin/chromium-browser \
+    && export CHROME_PATH=/usr/lib/chromium/
 
-RUN cd /usr/src/ && git clone https://github.com/codingsasi/warmer.git  \
-    && cd warmer && cargo build --release \
+ENV CHROME_BIN=/usr/bin/chromium-browser
+ENV CHROME_PATH=/usr/lib/chromium/
+
+COPY . /usr/src/warmer
+RUN cd /usr/src/warmer && cargo build --release \
     && cp target/release/warmer /usr/bin/warmer \
     && rm -rf /usr/src/warmer/* \
     && apk add --no-cache \
@@ -20,6 +36,8 @@ RUN cd /usr/src/ && git clone https://github.com/codingsasi/warmer.git  \
        musl-dev \
        libgcc \
        openssl-libs-static \
+       zlib-dev \
+       zlib-static \
        git
 
 CMD ["/usr/bin/warmer"]
