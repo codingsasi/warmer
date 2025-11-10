@@ -12,7 +12,7 @@ The workflow:
 - Includes installation instructions in the release notes
 
 To create a new release:
-1. Create and push a version tag: `git tag v1.0.0 && git push origin v1.0.0`
+1. Create and push a version tag: `git tag 0.1.8 && git push origin 0.1.8`
 2. The workflow will automatically build packages and create a published release with the packages attached
 
 ## Prerequisites
