@@ -1,6 +1,6 @@
 [package]
 name = "warmer"
-version = "0.1.8"
+version = "0.1.9"
 authors = ["Abhai Sasidharan <mail@abh.ai>"]
 edition = "2024"
 description = "A lightweight CDN cache warmer. A sitemap.xml is required for this to work. See README on how to use."
@@ -16,6 +16,36 @@ include = [
     "/tests/**",
 ]
 rust-version = "1.90"
+
+[package.metadata.deb]
+maintainer = "Abhai Sasidharan <mail@abh.ai>"
+copyright = "2024, Abhai Sasidharan <mail@abh.ai>"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+A modern HTTP load testing and CDN cache warming tool in Rust. \
+Inspired by tools like siege and wrk, warmer provides advanced features \
+including sitemap-based cache warming, JavaScript site crawling, and \
+comprehensive asset discovery with concurrent request handling."""
+depends = "$auto"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/warmer", "usr/bin/warmer", "755"],
+    ["README.md", "usr/share/doc/warmer/README.md", "644"],
+    ["LICENSE", "usr/share/doc/warmer/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "GPL-2.0-only"
+summary = "A modern HTTP load testing and CDN cache warming tool in Rust"
+assets = [
+    { source = "target/release/warmer", dest = "/usr/bin/warmer", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/warmer/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/warmer/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.38"
 
 [dependencies]
 serde = { version = "1.0.147", features = ["derive"] }

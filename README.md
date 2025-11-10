@@ -133,6 +133,46 @@ docker run abhaisasidharan/warmer warmer https://example.com -j -T4
 docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
 ```
 
+### Install from Package (.deb or .rpm)
+
+#### Debian/Ubuntu (.deb)
+
+1. Download the `.deb` package from the [releases page](https://github.com/codingsasi/warmer/releases)
+2. Install the package:
+   ```bash
+   sudo dpkg -i warmer_*.deb
+   ```
+3. If there are missing dependencies, install them:
+   ```bash
+   sudo apt-get install -f
+   ```
+
+#### Fedora/RHEL (.rpm)
+
+1. Download the `.rpm` package from the [releases page](https://github.com/codingsasi/warmer/releases)
+2. Install the package:
+   ```bash
+   sudo dnf install warmer-*.rpm
+   ```
+
+#### Google Chrome for JavaScript Mode
+
+The `--js` flag requires Google Chrome to be installed. Install it as follows:
+
+**For Debian/Ubuntu:**
+```bash
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo apt install ./google-chrome-stable_current_amd64.deb
+```
+
+**For Fedora/RHEL:**
+```bash
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
+sudo dnf install ./google-chrome-stable_current_x86_64.rpm
+```
+
+**Note**: Without Chrome installed, the `--js` flag will not work. Regular sitemap and crawling modes do not require Chrome.
+
 ### Build from source
 If you prefer to build from source:
 
@@ -170,8 +210,10 @@ Shortest transaction:      26.00 ms
 ```
 
 ## Notes
-- **Docker Required**: The recommended way to run warmer is using Docker. No local installation needed!
+- **Docker Recommended**: The easiest way to run warmer is using Docker. No local installation needed!
+- **Package Installation**: Native `.deb` and `.rpm` packages are available for direct installation on Linux systems
 - **Multi-architecture Support**: Works on x86_64 (Intel/AMD) and ARM64 (Apple Silicon, ARM servers)
+- **Chrome Required for JS Mode**: The `--js` flag requires Google Chrome to be installed separately (see Installation section)
 - Large sitemaps that include other zipped or gzipped sitemaps are not supported yet
 - Asset loading is enabled by default for comprehensive cache warming
 - Use `-n, --no-assets` for pure load testing without asset crawling

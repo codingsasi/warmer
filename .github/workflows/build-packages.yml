@@ -1,0 +1,124 @@
+name: Build Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-packages:
+    name: Build Linux Packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for packaging
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.package
+          push: false
+          tags: warmer-package-builder:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build packages in Docker
+        id: build_packages
+        run: |
+          # Build both packages
+          docker run --rm \
+            -v "$PWD:/build" \
+            -w /build \
+            warmer-package-builder:latest \
+            bash -c "cargo deb && cargo generate-rpm"
+
+          # Find and set outputs
+          DEB_FILE=$(find target/debian -name "*.deb" -type f 2>/dev/null | head -n 1)
+          RPM_FILE=$(find target/generate-rpm -name "*.rpm" -type f 2>/dev/null | head -n 1)
+
+          if [ -n "$DEB_FILE" ]; then
+            echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
+            echo "deb_name=$(basename $DEB_FILE)" >> $GITHUB_OUTPUT
+            echo "✅ .deb package created: $DEB_FILE"
+          fi
+
+          if [ -n "$RPM_FILE" ]; then
+            echo "rpm_file=$RPM_FILE" >> $GITHUB_OUTPUT
+            echo "rpm_name=$(basename $RPM_FILE)" >> $GITHUB_OUTPUT
+            echo "✅ .rpm package created: $RPM_FILE"
+          fi
+
+          if [ -z "$DEB_FILE" ] && [ -z "$RPM_FILE" ]; then
+            echo "❌ No packages were created"
+            exit 1
+          fi
+
+      - name: Upload .deb package artifact
+        if: steps.build_packages.outputs.deb_file
+        uses: actions/upload-artifact@v4
+        with:
+          name: warmer-deb-package
+          path: ${{ steps.build_packages.outputs.deb_file }}
+          retention-days: 30
+
+      - name: Upload .rpm package artifact
+        if: steps.build_packages.outputs.rpm_file
+        uses: actions/upload-artifact@v4
+        with:
+          name: warmer-rpm-package
+          path: ${{ steps.build_packages.outputs.rpm_file }}
+          retention-days: 30
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          files: |
+            ${{ steps.build_packages.outputs.deb_file }}
+            ${{ steps.build_packages.outputs.rpm_file }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### Debian/Ubuntu (.deb)
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/warmer_*.deb
+            sudo dpkg -i warmer_*.deb
+            sudo apt-get install -f  # Install missing dependencies if needed
+            ```
+
+            ### Fedora/RHEL (.rpm)
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/warmer-*.rpm
+            sudo dnf install warmer-*.rpm
+            ```
+
+            ### Google Chrome for JavaScript Mode
+            The `--js` flag requires Google Chrome. See the [README](https://github.com/${{ github.repository }}/blob/main/README.md#google-chrome-for-javascript-mode) for installation instructions.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Package Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.build_packages.outputs.deb_file }}" ]; then
+            echo "✅ **.deb package**: ${{ steps.build_packages.outputs.deb_name }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${{ steps.build_packages.outputs.rpm_file }}" ]; then
+            echo "✅ **.rpm package**: ${{ steps.build_packages.outputs.rpm_name }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Packages have been built and attached to the release." >> $GITHUB_STEP_SUMMARY
+
