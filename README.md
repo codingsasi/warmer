@@ -1,5 +1,5 @@
 # warmer
-A modern HTTP load testing and CDN cache warming tool in Rust. Inspired by tools like siege and wrk, warmer provides advanced features including sitemap-based cache warming, JavaScript site crawling, and comprehensive asset discovery with concurrent request handling.
+A HTTP load testing and CDN cache warming tool in Rust. Inspired by tools like siege and wrk, warmer provides advanced features including sitemap-based cache warming, JavaScript site crawling, and comprehensive asset discovery with concurrent request handling.
 
 ## Quick Start
 
