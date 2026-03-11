@@ -1,19 +1,20 @@
 use serde::{Deserialize, Serialize};
-use serde_xml_rs::{from_str};
-use std::sync::{Arc, Mutex};
-// Removed unused imports
-use std::time::{Duration, Instant};
+use serde_xml_rs::from_str;
 use std::collections::HashMap;
-use isahc::{config::RedirectPolicy, prelude::*, Request};
-use clap::Parser;
-use ctrlc;
+use std::fs;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::process::exit;
-use isahc::config::SslOption;
-use url::{Url};
-use tokio::time::sleep;
+use clap::Parser;
+use clap::CommandFactory;
 use colored::*;
-use scraper::{Html, Selector};
+use ctrlc;
+use isahc::{config::RedirectPolicy, prelude::*, Request};
+use isahc::config::SslOption;
 use rand::Rng;
+use scraper::{Html, Selector};
+use tokio::time::sleep;
+use url::Url;
 mod js_crawler;
 
 /// The struct to deserialize and hold the items in <url></url>
@@ -55,7 +56,7 @@ struct Cli {
     repetitions: Option<usize>,
 
     /// Delay between requests (seconds)
-    #[arg(short = 'd', long = "delay", default_value_t = 1)]
+    #[arg(short = 'd', long = "delay", default_value_t = 0)]
     delay: u64,
 
     /// Verbose output
@@ -86,9 +87,108 @@ struct Cli {
     #[arg(short = 'j', long = "js")]
     js_mode: bool,
 
-    /// Number of discovery threads for JavaScript mode (default: CPU cores / 2)
+    /// Number of discovery threads for JavaScript mode (default: CPU cores / 2, min 2, max 8)
     #[arg(short = 'T', long = "discovery-threads")]
     discovery_threads: Option<usize>,
+
+    /// Path to TOML config file (e.g., warmer-config.toml)
+    #[arg(short = 'C', long = "config")]
+    config: Option<String>,
+
+    /// Rotate through the built-in browser-like User-Agent list (anonymize requests)
+    #[arg(short = 'a', long = "anonymize")]
+    anonymize: bool,
+}
+
+/// Configuration loaded from a TOML file (everything except URL).
+/// Kept separate from Cli because clap needs concrete types and default_value_t
+/// for good CLI UX, while serde needs Option<T> for optional TOML keys.
+/// Fields that CLI overrides are still deserialized for schema compatibility but not read.
+#[derive(Default, Deserialize)]
+#[allow(dead_code)]
+struct FileConfig {
+    #[serde(default)]
+    concurrent: Option<usize>,
+    #[serde(default)]
+    time: Option<String>,
+    #[serde(default)]
+    repetitions: Option<usize>,
+    #[serde(default)]
+    delay: Option<u64>,
+    #[serde(default)]
+    verbose: Option<bool>,
+    #[serde(default)]
+    sitemap: Option<bool>,
+    #[serde(default)]
+    internet: Option<bool>,
+    #[serde(default, rename = "no_assets", alias = "no-assets")]
+    no_assets: Option<bool>,
+    #[serde(default)]
+    crawl: Option<bool>,
+    #[serde(default, rename = "follow_links", alias = "follow-links")]
+    follow_links: Option<bool>,
+    #[serde(default, rename = "js_mode", alias = "js", alias = "js-mode")]
+    js_mode: Option<bool>,
+    #[serde(default, rename = "discovery_threads", alias = "discovery-threads")]
+    discovery_threads: Option<usize>,
+    #[serde(default, rename = "user_agent", alias = "user-agent")]
+    user_agent: Option<String>,
+    #[serde(
+        default,
+        rename = "user_agent_list",
+        alias = "user-agents",
+        alias = "user_agents",
+        alias = "user-agent-list",
+        alias = "user_agents_list"
+    )]
+    user_agent_list: Vec<String>,
+}
+
+/// Effective configuration after merging CLI and file. Single source of truth for runtime.
+#[derive(Clone)]
+struct ResolvedConfig {
+    concurrent: usize,
+    time: Option<String>,
+    repetitions: Option<usize>,
+    delay: u64,
+    verbose: bool,
+    #[allow(dead_code)] // reserved for future sitemap-mode branching
+    sitemap: bool,
+    internet: bool,
+    no_assets: bool,
+    crawl: bool,
+    follow_links: bool,
+    js_mode: bool,
+    discovery_threads: Option<usize>,
+    user_agent: Option<String>,
+    user_agent_list: Vec<String>,
+    anonymize: bool,
+}
+
+/// Merges CLI and file config. **CLI takes precedence for all options** except user-agent
+/// (user_agent and user_agent_list), which are long and stay config-only / config wins.
+fn resolve_config(cli: Cli, file: &FileConfig) -> ResolvedConfig {
+    ResolvedConfig {
+        concurrent: cli.concurrent,
+        time: cli.time.or_else(|| file.time.clone()),
+        repetitions: cli.repetitions.or(file.repetitions),
+        delay: cli.delay,
+        verbose: cli.verbose,
+        sitemap: cli.sitemap,
+        internet: cli.internet,
+        no_assets: cli.no_assets,
+        crawl: cli.crawl,
+        follow_links: cli.follow_links,
+        js_mode: cli.js_mode,
+        discovery_threads: cli.discovery_threads.or(file.discovery_threads),
+        user_agent: file.user_agent.clone(),
+        user_agent_list: if file.user_agent_list.is_empty() {
+            vec![]
+        } else {
+            file.user_agent_list.clone()
+        },
+        anonymize: cli.anonymize,
+    }
 }
 
 /// Performance statistics tracking
@@ -500,20 +600,30 @@ async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error:
 }
 
 /// Extract links from a URL and follow them to build a sitemap-like list
-async fn follow_links_from_url(start_url: &str, concurrency: usize, stats: Arc<Mutex<Stats>>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn follow_links_from_url(
+    start_url: &str,
+    concurrency: usize,
+    stats: Arc<Mutex<Stats>>,
+    user_agent_mode: Arc<UserAgentMode>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     println!("Follow-links mode: Starting to crawl from {} with {} threads", start_url, concurrency);
 
     // First, get the initial page and extract links
     let base_url = if let Ok(parsed_url) = Url::parse(start_url) {
         let scheme = parsed_url.scheme();
-        let host = parsed_url.host_str().unwrap_or("localhost");
-        format!("{}://{}", scheme, host)
+        let host = parsed_url.host_str().unwrap_or_default();
+        if host.is_empty() {
+            start_url.to_string()
+        } else {
+            format!("{}://{}", scheme, host)
+        }
     } else {
         start_url.to_string()
     };
 
     // Make the request to get HTML content
-    let (status_code, response_time, data_size, html_content, _) = make_request(start_url, false, true).await;
+    let (status_code, response_time, data_size, html_content, _) =
+        make_request(start_url, false, true, user_agent_mode.clone()).await;
 
     // Update stats for the main request
     {
@@ -556,6 +666,7 @@ async fn follow_links_from_url(start_url: &str, concurrency: usize, stats: Arc<M
     // Create worker threads
     let mut handles = vec![];
     let base_url = Arc::new(base_url);
+    let user_agent_mode = Arc::clone(&user_agent_mode);
 
     // Spawn worker threads
     for (_, work) in thread_work.into_iter().enumerate() {
@@ -567,6 +678,7 @@ async fn follow_links_from_url(start_url: &str, concurrency: usize, stats: Arc<M
         let discovered_urls = discovered_urls.clone();
         let base_url = base_url.clone();
         let stats = stats.clone();
+        let user_agent_mode = user_agent_mode.clone();
 
         let handle = tokio::spawn(async move {
             for current_url in work {
@@ -587,7 +699,8 @@ async fn follow_links_from_url(start_url: &str, concurrency: usize, stats: Arc<M
                 };
 
                 // Make the request to get HTML content
-                let (status_code, response_time, data_size, html_content, _) = make_request(&current_url, false, true).await;
+                let (status_code, response_time, data_size, html_content, _) =
+                    make_request(&current_url, false, true, user_agent_mode.clone()).await;
 
                 // Update stats for the main request
                 {
@@ -618,10 +731,12 @@ async fn follow_links_from_url(start_url: &str, concurrency: usize, stats: Arc<M
 
                             let stats = stats.clone();
                             let asset_url_clone = asset_url.clone();
+                            let user_agent_mode = user_agent_mode.clone();
 
                             // Spawn a task for each asset
                             let handle = tokio::spawn(async move {
-                                let (asset_status, asset_time, asset_size, _, _) = make_request(&asset_url_clone, false, false).await;
+                                let (asset_status, asset_time, asset_size, _, _) =
+                                    make_request(&asset_url_clone, false, false, user_agent_mode).await;
 
                                 // Update stats for asset
                                 {
@@ -782,27 +897,97 @@ fn extract_domain(url: &str) -> Option<String> {
     None
 }
 
-/// Generate a random realistic user agent string
-fn get_random_user_agent() -> &'static str {
-    let user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0 +warmer (https://abh.ai/warmer)",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/129.0.0.0 +warmer (https://abh.ai/warmer)",
-        // Fallback simple user agents
-        "curl/7.68.0 +warmer (https://abh.ai/warmer)",
-        "wget/1.20.3 +warmer (https://abh.ai/warmer)",
-        "Python-urllib/3.8 +warmer (https://abh.ai/warmer)",
-    ];
+/// User-Agent selection strategy
+#[derive(Clone)]
+enum UserAgentMode {
+    /// Single fixed User-Agent string
+    Single(String),
+    /// Rotate through the built-in browser-like User-Agent list
+    RotateBuiltIn,
+    /// Rotate through a list of User-Agents loaded from config
+    RotateList(Vec<String>),
+}
 
-    let mut rng = rand::rng();
-    user_agents[rng.random_range(0..user_agents.len())]
+fn default_product_user_agent() -> String {
+    "warmer/0.1.2 (+https://abh.ai/warmer)".to_string()
+}
+
+fn load_config(path: &str) -> FileConfig {
+    let contents = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Failed to read config file {}: {}. Using CLI options only.",
+                path, e
+            );
+            return FileConfig::default();
+        }
+    };
+
+    match toml::from_str::<FileConfig>(&contents) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "Failed to parse config file {} as TOML: {}. Using CLI options only.",
+                path, e
+            );
+            FileConfig::default()
+        }
+    }
+}
+
+fn build_user_agent_mode(resolved: &ResolvedConfig) -> UserAgentMode {
+    // 1. Single User-Agent from config
+    if let Some(ref ua) = resolved.user_agent {
+        return UserAgentMode::Single(ua.clone());
+    }
+
+    // 2. User-Agent list from config (custom list in .toml)
+    if !resolved.user_agent_list.is_empty() {
+        if resolved.user_agent_list.len() == 1 {
+            return UserAgentMode::Single(resolved.user_agent_list[0].clone());
+        } else {
+            return UserAgentMode::RotateList(resolved.user_agent_list.clone());
+        }
+    }
+
+    // 3. -a/--anonymize: rotate through built-in list in code
+    if resolved.anonymize {
+        UserAgentMode::RotateBuiltIn
+    } else {
+        // 4. Default: single product User-Agent
+        UserAgentMode::Single(default_product_user_agent())
+    }
+}
+
+fn get_user_agent(mode: &UserAgentMode) -> String {
+    match mode {
+        UserAgentMode::Single(ua) => ua.clone(),
+        UserAgentMode::RotateBuiltIn => {
+            let user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0",
+                "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/129.0.0.0",
+            ];
+
+            let mut rng = rand::rng();
+            user_agents[rng.random_range(0..user_agents.len())].to_string()
+        }
+        UserAgentMode::RotateList(list) => {
+            if list.is_empty() {
+                return default_product_user_agent();
+            }
+            let mut rng = rand::rng();
+            list[rng.random_range(0..list.len())].clone()
+        }
+    }
 }
 
 /// Normalize URL for comparison (ignore http/https difference and trailing slashes)
@@ -835,11 +1020,18 @@ fn build_asset_url(asset_path: &str, base_url: &str) -> Result<String, url::Pars
 }
 
 /// Make a single HTTP request with optional highlighting
-async fn make_request(url: &str, _verbose: bool, is_main_url: bool) -> (u16, f64, u64, Option<String>, String) {
+async fn make_request(
+    url: &str,
+    _verbose: bool,
+    is_main_url: bool,
+    user_agent_mode: Arc<UserAgentMode>,
+) -> (u16, f64, u64, Option<String>, String) {
     let start = Instant::now();
 
+    let user_agent = get_user_agent(&user_agent_mode);
+
     let result = Request::get(url)
-        .header("User-Agent", get_random_user_agent())
+        .header("User-Agent", user_agent)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .header("Accept-Language", "en-US,en;q=0.9")
         .header("Accept-Encoding", "gzip, deflate")
@@ -856,8 +1048,11 @@ async fn make_request(url: &str, _verbose: bool, is_main_url: bool) -> (u16, f64
     match result {
         Ok(mut resp) => {
             let status_code = resp.status().as_u16();
-            let parsed_url = Url::parse(url).unwrap_or_else(|_| Url::parse("http://localhost").unwrap());
-            let path = parsed_url.path();
+            let parsed_url = Url::parse(url);
+            let path = parsed_url
+                .as_ref()
+                .map(|u| u.path())
+                .unwrap_or("/");
 
             // Get the HTTP version
             let http_version = match resp.version() {
@@ -905,6 +1100,7 @@ async fn crawl_urls(
     stats: Arc<Mutex<Stats>>,
     verbose: bool,
     no_assets: bool,
+    user_agent_mode: Arc<UserAgentMode>,
 ) {
     let mut processed_urls = std::collections::HashSet::new();
     let mut urls_to_process = urls;
@@ -922,14 +1118,19 @@ async fn crawl_urls(
         // Extract base URL for asset/link loading and preserve the protocol
         let (base_url, protocol) = if let Ok(parsed_url) = Url::parse(&current_url) {
             let scheme = parsed_url.scheme();
-            let host = parsed_url.host_str().unwrap_or("localhost");
-            (format!("{}://{}", scheme, host), scheme.to_string())
+            let host = parsed_url.host_str().unwrap_or_default();
+            if host.is_empty() {
+                (current_url.clone(), scheme.to_string())
+            } else {
+                (format!("{}://{}", scheme, host), scheme.to_string())
+            }
         } else {
-            ("https://localhost".to_string(), "https".to_string())
+            (current_url.clone(), "https".to_string())
         };
 
         if no_assets {
-            let (status_code, response_time, data_size, _, _) = make_request(&current_url, verbose, true).await;
+            let (status_code, response_time, data_size, _, _) =
+                make_request(&current_url, verbose, true, user_agent_mode.clone()).await;
 
             // Update stats
             {
@@ -937,14 +1138,34 @@ async fn crawl_urls(
                 stats.add_transaction(response_time, data_size, status_code);
             }
         } else {
-            load_assets_from_url(&current_url, &base_url, stats.clone(), verbose, true, &current_url, &protocol).await;
+            load_assets_from_url(
+                &current_url,
+                &base_url,
+                stats.clone(),
+                verbose,
+                true,
+                &current_url,
+                &protocol,
+                user_agent_mode.clone(),
+            )
+            .await;
         }
     }
 }
 
 /// Load static assets from a URL with optional highlighting
-async fn load_assets_from_url(url: &str, base_url: &str, stats: Arc<Mutex<Stats>>, verbose: bool, is_main_url: bool, main_url: &str, protocol: &str) {
-    let (status_code, response_time, data_size, html_content, _) = make_request(url, verbose, is_main_url).await;
+async fn load_assets_from_url(
+    url: &str,
+    base_url: &str,
+    stats: Arc<Mutex<Stats>>,
+    verbose: bool,
+    is_main_url: bool,
+    main_url: &str,
+    protocol: &str,
+    user_agent_mode: Arc<UserAgentMode>,
+) {
+    let (status_code, response_time, data_size, html_content, _) =
+        make_request(url, verbose, is_main_url, user_agent_mode.clone()).await;
 
     // Update stats for the main request
     {
@@ -970,7 +1191,8 @@ async fn load_assets_from_url(url: &str, base_url: &str, stats: Arc<Mutex<Stats>
                     asset_url = asset_url.replace("https://", "http://");
                 }
 
-                let (asset_status, asset_time, asset_size, _, _) = make_request(&asset_url, verbose, false).await;
+                let (asset_status, asset_time, asset_size, _, _) =
+                    make_request(&asset_url, verbose, false, user_agent_mode.clone()).await;
 
                 // Update stats for asset
                 {
@@ -994,6 +1216,7 @@ async fn run_user(
     no_assets: bool,
     thread_id: usize,
     total_threads: usize,
+    user_agent_mode: Arc<UserAgentMode>,
 ) {
     let mut rng = std::collections::hash_map::DefaultHasher::new();
     let start_time = Instant::now();
@@ -1046,15 +1269,20 @@ async fn run_user(
         // Extract base URL for asset loading and preserve the protocol
         let (base_url, protocol) = if let Ok(parsed_url) = Url::parse(&url) {
             let scheme = parsed_url.scheme();
-            let host = parsed_url.host_str().unwrap_or("localhost");
-            (format!("{}://{}", scheme, host), scheme.to_string())
+            let host = parsed_url.host_str().unwrap_or_default();
+            if host.is_empty() {
+                (url.clone(), scheme.to_string())
+            } else {
+                (format!("{}://{}", scheme, host), scheme.to_string())
+            }
         } else {
-            ("https://localhost".to_string(), "https".to_string())
+            (url.clone(), "https".to_string())
         };
 
         // Make request and load assets unless disabled
         if no_assets {
-            let (status_code, response_time, data_size, _, _) = make_request(&url, verbose, true).await;
+            let (status_code, response_time, data_size, _, _) =
+                make_request(&url, verbose, true, user_agent_mode.clone()).await;
 
             // Update stats
             {
@@ -1062,7 +1290,17 @@ async fn run_user(
                 stats.add_transaction(response_time, data_size, status_code);
             }
         } else {
-            load_assets_from_url(&url, &base_url, stats.clone(), verbose, true, &url, &protocol).await;
+            load_assets_from_url(
+                &url,
+                &base_url,
+                stats.clone(),
+                verbose,
+                true,
+                &url,
+                &protocol,
+                user_agent_mode.clone(),
+            )
+            .await;
         }
 
         request_count += 1;
@@ -1076,12 +1314,28 @@ async fn run_user(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // If no arguments were provided, show help/usage and exit
+    if std::env::args().len() == 1 {
+        let mut cmd = Cli::command();
+        cmd.print_help().unwrap();
+        println!();
+        return Ok(());
+    }
+
     // Parse command line arguments first
     let args = Cli::parse();
 
+    // Load config file (if provided) and merge with CLI into a single resolved config
+    let file_cfg = if let Some(ref config_path) = args.config {
+        load_config(config_path)
+    } else {
+        FileConfig::default()
+    };
+    let url = args.url.clone();
+    let resolved = resolve_config(args, &file_cfg);
+
     // Configure Tokio runtime with thread count based on concurrency
-    // Add some overhead for asset loading tasks
-    let worker_threads = args.concurrent * 2;
+    let worker_threads = resolved.concurrent * 2;
 
     // Create and run the Tokio runtime with our custom configuration
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1091,14 +1345,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
 
     // Run our async main function in the runtime
-    runtime.block_on(async_main(args))
+    runtime.block_on(async_main(resolved, url))
 }
 
-async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup stats and signal handler
     let stats = Arc::new(Mutex::new(Stats::new()));
     let stats_clone = stats.clone();
+
+    // Configure User-Agent strategy from resolved config
+    let user_agent_mode = Arc::new(build_user_agent_mode(&resolved));
 
     ctrlc::set_handler(move || {
         let mut stats = stats_clone.lock().unwrap();
@@ -1108,21 +1365,19 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Determine URLs to test - use JS mode, follow-links, or sitemap
-    let urls = if let Some(url) = args.url.clone() {
-        if args.js_mode {
+    let urls = if let Some(ref url) = url {
+        if resolved.js_mode {
             // If JS mode is enabled, use headless Chrome to crawl JavaScript/WASM sites
-            // JS mode automatically disables sitemap mode
-            match crawl_js_site(&url, args.concurrent, stats.clone(), args.discovery_threads).await {
+            match crawl_js_site(url, resolved.concurrent, stats.clone(), resolved.discovery_threads).await {
                 Ok(discovered_urls) => discovered_urls,
                 Err(js_err) => {
                     eprintln!("Failed to crawl JavaScript site: {}", js_err);
                     return Ok(());
                 }
             }
-        } else if args.follow_links {
+        } else if resolved.follow_links {
             // If follow-links is enabled, bypass sitemap processing entirely
-            // Note: We don't need to load URLs in follow-links mode since we do the loading during discovery
-            match follow_links_from_url(&url, args.concurrent, stats.clone()).await {
+            match follow_links_from_url(url, resolved.concurrent, stats.clone(), user_agent_mode.clone()).await {
                 Ok(discovered_urls) => discovered_urls,
                 Err(follow_err) => {
                     eprintln!("Failed to follow links: {}", follow_err);
@@ -1131,7 +1386,7 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         } else {
             // Try to load sitemap
-            match load_sitemap(&url).await {
+            match load_sitemap(url).await {
                 Ok(sitemap_urls) => sitemap_urls,
                 Err(e) => {
                     eprintln!("Failed to load sitemap: {}. Try using --follow-links or --js option.", e);
@@ -1140,32 +1395,9 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
-        // Default to sitemap mode with localhost, or follow-links/JS if enabled
-        if args.js_mode {
-            match crawl_js_site("http://localhost", args.concurrent, stats.clone(), args.discovery_threads).await {
-                Ok(discovered_urls) => discovered_urls,
-                Err(_) => {
-                    eprintln!("Failed to crawl JavaScript site from localhost");
-                    return Ok(());
-                }
-            }
-        } else if args.follow_links {
-            match follow_links_from_url("http://localhost", args.concurrent, stats.clone()).await {
-                Ok(discovered_urls) => discovered_urls,
-                Err(_) => {
-                    eprintln!("Failed to follow links from localhost");
-                    return Ok(());
-                }
-            }
-        } else {
-            match load_sitemap("http://localhost").await {
-                Ok(sitemap_urls) => sitemap_urls,
-                Err(_) => {
-                    eprintln!("Failed to load sitemap from localhost. Try using --follow-links or --js option.");
-                    return Ok(());
-                }
-            }
-        }
+        // No URL provided: URL is required, so bail out with a clear error
+        eprintln!("Error: URL argument is required. See --help for usage.");
+        return Ok(());
     };
 
     if urls.is_empty() {
@@ -1181,51 +1413,68 @@ async fn async_main(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Parse duration
-    let duration = if let Some(time_str) = args.time {
-        Some(parse_duration(&time_str)?)
+    let duration = if let Some(ref time_str) = resolved.time {
+        Some(parse_duration(time_str)?)
     } else {
         None
     };
 
     // Print header
-    if args.crawl {
+    if resolved.crawl {
         println!("** WARMER 0.1.2");
         println!("** Crawling mode - processing each URL only once");
         println!("** The server is now under load...");
-    } else if args.js_mode {
+    } else if resolved.js_mode {
         println!("** WARMER 0.1.2");
         println!("** JavaScript mode - using headless Chrome browser to crawl JS/WASM sites");
-        println!("** Preparing {} concurrent users for battle.", args.concurrent);
+        println!("** Preparing {} concurrent users for battle.", resolved.concurrent);
         println!("The server is now under load...");
     } else {
-        print_header(args.concurrent, &display_url);
+        print_header(resolved.concurrent, &display_url);
     }
 
-    // Handle special modes differently
-    if args.crawl {
+    // Handle execution modes
+    if resolved.crawl {
         // Crawl mode - process each URL only once, directly
-        crawl_urls((*urls).clone(), stats.clone(), args.verbose, args.no_assets).await;
-    } else if args.js_mode || args.follow_links {
-        // JS mode and follow-links mode already loaded the URLs during discovery, so we're done
-        // Just wait a moment to ensure all stats are properly recorded
-        sleep(Duration::from_millis(100)).await;
+        crawl_urls(
+            (*urls).clone(),
+            stats.clone(),
+            resolved.verbose,
+            resolved.no_assets,
+            user_agent_mode.clone(),
+        )
+        .await;
     } else {
-        // Normal load testing mode - spawn concurrent users
+        // Load testing mode (including JS and follow-links) - spawn concurrent users
         let mut handles = vec![];
-        let total_threads = args.concurrent;
+        let total_threads = resolved.concurrent;
 
         for thread_id in 0..total_threads {
             let urls = urls.clone();
             let stats = stats.clone();
-            let repetitions = args.repetitions;
+            let repetitions = resolved.repetitions;
             let duration = duration;
-            let delay = args.delay;
-            let verbose = args.verbose;
-            let internet_mode = args.internet;
-            let no_assets = args.no_assets;
+            let delay = resolved.delay;
+            let verbose = resolved.verbose;
+            let internet_mode = resolved.internet;
+            let no_assets = resolved.no_assets;
+            let user_agent_mode = user_agent_mode.clone();
 
             let handle = tokio::spawn(async move {
-                run_user(urls, stats, repetitions, duration, delay, verbose, internet_mode, no_assets, thread_id, total_threads).await;
+                run_user(
+                    urls,
+                    stats,
+                    repetitions,
+                    duration,
+                    delay,
+                    verbose,
+                    internet_mode,
+                    no_assets,
+                    thread_id,
+                    total_threads,
+                    user_agent_mode,
+                )
+                .await;
             });
 
             handles.push(handle);

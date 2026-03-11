@@ -9,11 +9,15 @@ use crate::Stats;
 pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex<Stats>>, discovery_threads: Option<usize>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     println!("JavaScript mode: Starting headless Chrome browser to crawl from {}", start_url);
 
-    // Extract base host for filtering
+    // Extract base host for filtering; require a valid host from the provided URL
     let base_host = if let Ok(parsed_url) = Url::parse(start_url) {
-        parsed_url.host_str().unwrap_or("localhost").to_string()
+        if let Some(host) = parsed_url.host_str() {
+            host.to_string()
+        } else {
+            return Err("Invalid URL: missing host. Please provide a full URL (e.g., https://example.com)".into());
+        }
     } else {
-        "localhost".to_string()
+        return Err("Invalid URL: unable to parse. Please provide a full URL (e.g., https://example.com)".into());
     };
 
     // Global collections to track everything

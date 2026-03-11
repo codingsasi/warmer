@@ -48,7 +48,7 @@ docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
 - `-c, --concurrent <NUM>`: Number of concurrent users (default: 25)
 - `-t, --time <TIME>`: Time to run the test (e.g., 5S, 1M, 1H)
 - `-r, --repetitions <NUM>`: Number of repetitions per user
-- `-d, --delay <SECONDS>`: Delay between requests (default: 1)
+- `-d, --delay <SECONDS>`: Delay between requests (default: 0)
 - `-v, --verbose`: Verbose output
 - `-s, --sitemap`: Use sitemap mode (default for all modes)
 - `-i, --internet`: Internet mode - random URL selection from sitemap
@@ -57,6 +57,8 @@ docker run abhaisasidharan/warmer warmer https://example.com -s -t1M -c25
 - `-f, --follow-links`: Follow links mode - discover URLs by following links from the provided URL (bypasses sitemap processing)
 - `-j, --js`: JavaScript mode - use headless Chrome browser to crawl JavaScript/WASM sites and discover dynamically generated links (automatically disables sitemap mode)
 - `-T, --discovery-threads <NUM>`: Number of discovery threads for JavaScript mode (default: CPU cores / 2, min 2, max 8)
+- `-C, --config <PATH>`: Path to TOML config file (e.g. `warmer-config.toml`). All options except URL can be set in the config. **CLI always overrides config** for every option except user-agent settings (`user-agent`, `user-agents`), which are long and are taken from the config file only.
+- `-a, --anonymize`: Rotate through the built-in browser-like User-Agent list (anonymize requests). To use a custom list, set `user-agent` (single) or `user-agents` (list) in the config file.
 
 ### Examples
 
@@ -112,6 +114,13 @@ docker run abhaisasidharan/warmer warmer https://example-spa.com -j -T4
 **Sitemap mode (XML parsing only):**
 ```bash
 docker run abhaisasidharan/warmer warmer https://example.com -s
+```
+
+**Using a config file:**
+```bash
+# Copy the example config and edit as needed
+cp warmer-config.toml.example warmer-config.toml
+warmer https://example.com -C warmer-config.toml
 ```
 
 ## Installation

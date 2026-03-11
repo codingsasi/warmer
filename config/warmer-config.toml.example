@@ -1,0 +1,67 @@
+#
+# warmer-config.toml.example
+#
+# Example configuration file for warmer.
+# All options except the URL can be configured here using TOML `key = value`.
+# Command-line flags always take precedence where noted.
+#
+# To use:
+#   cp warmer-config.toml.example warmer-config.toml
+#   warmer https://example.com -C warmer-config.toml
+#
+
+# --- Load / behavior options ---
+
+# Number of concurrent users (equivalent to -c / --concurrent)
+concurrent = 25
+
+# Time to run the test (equivalent to -t / --time)
+# Format: <number><S|M|H>, e.g. 5S, 30S, 1M, 2H
+time = "30S"
+
+# Number of repetitions per user (equivalent to -r / --repetitions)
+# If unset, duration-based testing is used.
+repetitions = 0
+
+# Delay between requests in seconds (equivalent to -d / --delay)
+delay = 0
+
+# Verbose output (equivalent to -v / --verbose)
+verbose = false
+
+# Sitemap mode (equivalent to -s / --sitemap)
+sitemap = true
+
+# Internet mode - random URL selection from sitemap (equivalent to -i / --internet)
+internet = false
+
+# Disable static asset loading (equivalent to -n / --no-assets)
+no-assets = false
+
+# Crawl mode - go through each URL only once, then stop (equivalent to -w / --crawl)
+crawl = false
+
+# Follow-links mode - discover URLs by following links (equivalent to -f / --follow-links)
+follow-links = false
+
+# JavaScript mode - use headless Chrome to crawl JS/WASM sites (equivalent to -j / --js)
+js = false
+
+# Number of discovery threads for JavaScript mode (equivalent to -T / --discovery-threads)
+discovery-threads = 4
+
+
+# --- User-Agent options (config only; use -a in CLI to rotate built-in list) ---
+
+# Single custom User-Agent string to use for all requests.
+# user-agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# List of User-Agent strings to rotate through. Put one per line for readability.
+# Warmer will randomly pick one per request. Omit for default product UA, or use -a to rotate built-in list.
+user-agents = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
