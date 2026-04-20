@@ -396,8 +396,19 @@ fn print_statistics(stats: &Stats) {
     println!();
 }
 
+fn common_sitemap_candidates(base_url: &str) -> Vec<String> {
+    vec![
+        format!("{}/sitemap.xml", base_url),
+        format!("{}/sitemap_index.xml", base_url),
+        format!("{}/sitemap-index.xml", base_url),
+        format!("{}/sitemaps.xml", base_url),
+        format!("{}/sitemap-0.xml", base_url),
+        format!("{}/news-sitemap.xml", base_url),
+    ]
+}
+
 /// Find sitemap URL from robots.txt
-async fn find_sitemap_url_from_robots(base_url: &str) -> Result<String, Box<dyn std::error::Error>> {
+async fn find_sitemap_url_from_robots(base_url: &str, user_agent: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // Construct robots.txt URL
     let robots_url = format!("{}/robots.txt", base_url);
     println!("Checking robots.txt at {}", robots_url);
@@ -406,43 +417,49 @@ async fn find_sitemap_url_from_robots(base_url: &str) -> Result<String, Box<dyn 
     let response = Request::get(&robots_url)
         .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
         .redirect_policy(RedirectPolicy::Follow)
+        .header("User-Agent", user_agent)
         .body(());
 
     if response.is_err() {
         println!("Error creating request for robots.txt");
-        return Ok(format!("{}/sitemap.xml", base_url));
+        return Ok(common_sitemap_candidates(base_url));
     }
 
     let response = response?.send();
 
     if response.is_err() {
         println!("Error fetching robots.txt");
-        return Ok(format!("{}/sitemap.xml", base_url));
+        return Ok(common_sitemap_candidates(base_url));
     }
 
     let mut response = response?;
 
     if response.status().as_str() != "200" {
-        println!("No robots.txt found (status: {}), defaulting to /sitemap.xml", response.status());
-        return Ok(format!("{}/sitemap.xml", base_url));
+        println!("No robots.txt found (status: {}), will try common sitemap locations", response.status());
+        return Ok(common_sitemap_candidates(base_url));
     }
 
-    // Parse robots.txt to find Sitemap: directive
+    // Parse robots.txt to find Sitemap: directives (there may be multiple)
     let robots_content = response.text()?;
+    let mut sitemap_urls: Vec<String> = Vec::new();
     for line in robots_content.lines() {
         let line = line.trim();
         if line.to_lowercase().starts_with("sitemap:") {
             let sitemap_url = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
             if !sitemap_url.is_empty() {
-                println!("Found sitemap URL in robots.txt: {}", sitemap_url);
-                return Ok(sitemap_url);
+                sitemap_urls.push(sitemap_url);
             }
         }
     }
 
-    // If no sitemap found in robots.txt, default to standard location
-    println!("No sitemap directive found in robots.txt, defaulting to /sitemap.xml");
-    Ok(format!("{}/sitemap.xml", base_url))
+    if !sitemap_urls.is_empty() {
+        println!("Found {} sitemap URL(s) in robots.txt", sitemap_urls.len());
+        return Ok(sitemap_urls);
+    }
+
+    // If no sitemap found in robots.txt, try common locations
+    println!("No sitemap directive found in robots.txt, will try common sitemap locations");
+    Ok(common_sitemap_candidates(base_url))
 }
 
 /// Parse a sitemap index file and return all sitemap URLs
@@ -471,23 +488,32 @@ async fn parse_sitemap_index(content: &str) -> Result<Vec<String>, Box<dyn std::
 }
 
 /// Load URLs from all sitemaps
-async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // Find sitemap URL from robots.txt
-    let initial_sitemap_url = find_sitemap_url_from_robots(base_url).await?;
+async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let user_agent = get_user_agent(&user_agent_mode);
 
-    // Process sitemaps, starting with the initial one
-    let mut sitemap_urls_to_process = vec![initial_sitemap_url];
+    // Find candidate sitemap URLs from robots.txt (or common locations)
+    let initial_candidates = find_sitemap_url_from_robots(base_url, &user_agent).await?;
+
+    let mut sitemap_urls_to_process = initial_candidates;
+    let mut tried_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut all_page_urls = Vec::new();
     let mut any_sitemap_found = false;
 
     while !sitemap_urls_to_process.is_empty() {
         let current_sitemap_url = sitemap_urls_to_process.remove(0);
+
+        if tried_urls.contains(&current_sitemap_url) {
+            continue;
+        }
+        tried_urls.insert(current_sitemap_url.clone());
+
         println!("Processing sitemap: {}", current_sitemap_url);
 
         // Fetch the sitemap
         let response = Request::get(&current_sitemap_url)
             .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
             .redirect_policy(RedirectPolicy::Follow)
+            .header("User-Agent", &user_agent)
             .body(());
 
         if response.is_err() {
@@ -506,6 +532,14 @@ async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error:
 
         if response.status().as_str() != "200" {
             println!("Sitemap URL returned status: {}", response.status());
+            // If we haven't found any working sitemap yet, queue remaining common locations
+            if !any_sitemap_found {
+                for candidate in common_sitemap_candidates(base_url) {
+                    if !tried_urls.contains(&candidate) {
+                        sitemap_urls_to_process.push(candidate);
+                    }
+                }
+            }
             continue;
         }
 
@@ -517,22 +551,10 @@ async fn load_sitemap(base_url: &str) -> Result<Vec<String>, Box<dyn std::error:
            content.trim_start().to_lowercase().starts_with("<html") {
             println!("Sitemap URL returned HTML instead of XML, trying alternative approaches...");
 
-            // Try the direct sitemap.xml path
-            let direct_sitemap_url = format!("{}/sitemap.xml", base_url);
-            if direct_sitemap_url != current_sitemap_url {
-                println!("Trying direct sitemap path: {}", direct_sitemap_url);
-                sitemap_urls_to_process.push(direct_sitemap_url);
-            }
-
-            // Also try some common sitemap variations
-            let variations = vec![
-                format!("{}/sitemap_index.xml", base_url),
-                format!("{}/sitemaps.xml", base_url),
-                format!("{}/sitemap-0.xml", base_url),
-            ];
-
-            for variation in variations {
-                sitemap_urls_to_process.push(variation);
+            for candidate in common_sitemap_candidates(base_url) {
+                if !tried_urls.contains(&candidate) {
+                    sitemap_urls_to_process.push(candidate);
+                }
             }
             continue;
         }
@@ -1386,7 +1408,7 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
             }
         } else {
             // Try to load sitemap
-            match load_sitemap(url).await {
+            match load_sitemap(url, user_agent_mode.clone()).await {
                 Ok(sitemap_urls) => sitemap_urls,
                 Err(e) => {
                     eprintln!("Failed to load sitemap: {}. Try using --follow-links or --js option.", e);
