@@ -1,23 +1,41 @@
+use crate::Stats;
 use headless_chrome::{Browser, LaunchOptions};
-use isahc::{prelude::*, config::{SslOption, RedirectPolicy}, Request};
+use isahc::{
+    Request,
+    config::{RedirectPolicy, SslOption},
+    prelude::*,
+};
 use serde_json;
 use std::sync::{Arc, Mutex};
 use url::Url;
-use crate::Stats;
 
 /// Crawl JavaScript/WASM sites using headless Chrome browser with recursive discovery and load testing
-pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex<Stats>>, discovery_threads: Option<usize>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    println!("JavaScript mode: Starting headless Chrome browser to crawl from {}", start_url);
+pub async fn crawl_js_site(
+    start_url: &str,
+    concurrency: usize,
+    stats: Arc<Mutex<Stats>>,
+    discovery_threads: Option<usize>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    println!(
+        "JavaScript mode: Starting headless Chrome browser to crawl from {}",
+        start_url
+    );
 
     // Extract base host for filtering; require a valid host from the provided URL
     let base_host = if let Ok(parsed_url) = Url::parse(start_url) {
         if let Some(host) = parsed_url.host_str() {
             host.to_string()
         } else {
-            return Err("Invalid URL: missing host. Please provide a full URL (e.g., https://example.com)".into());
+            return Err(
+                "Invalid URL: missing host. Please provide a full URL (e.g., https://example.com)"
+                    .into(),
+            );
         }
     } else {
-        return Err("Invalid URL: unable to parse. Please provide a full URL (e.g., https://example.com)".into());
+        return Err(
+            "Invalid URL: unable to parse. Please provide a full URL (e.g., https://example.com)"
+                .into(),
+        );
     };
 
     // Global collections to track everything
@@ -26,7 +44,11 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
     let visited_urls = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     // Function to discover URLs and assets from a single page
-    fn discover_page(url: &str, base_host: &str, browser: &Browser) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+    fn discover_page(
+        url: &str,
+        base_host: &str,
+        browser: &Browser,
+    ) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
         // JavaScript for extracting links
         let links_js = r#"
             (() => {
@@ -96,7 +118,7 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                     println!("Failed to parse links JSON: {}", e);
                     Vec::new()
                 })
-            },
+            }
             None => {
                 println!("No links value, checking preview...");
                 if let Some(preview) = &links_result.preview {
@@ -112,7 +134,7 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                 } else {
                     Vec::new()
                 }
-            },
+            }
         };
 
         // Extract assets
@@ -134,11 +156,12 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                 } else {
                     Vec::new()
                 }
-            },
+            }
         };
 
         // Filter same-host links
-        let same_host_links: Vec<String> = page_links.into_iter()
+        let same_host_links: Vec<String> = page_links
+            .into_iter()
             .filter(|link| {
                 if let Ok(parsed_url) = Url::parse(link) {
                     if let Some(link_host) = parsed_url.host_str() {
@@ -149,7 +172,12 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
             })
             .collect();
 
-        println!("Discovered {} same-host links and {} assets from {}", same_host_links.len(), page_assets.len(), url);
+        println!(
+            "Discovered {} same-host links and {} assets from {}",
+            same_host_links.len(),
+            page_assets.len(),
+            url
+        );
         Ok((same_host_links, page_assets))
     }
 
@@ -159,7 +187,11 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
             return;
         }
 
-        println!("Load testing {} assets with {} threads", assets.len(), concurrency);
+        println!(
+            "Load testing {} assets with {} threads",
+            assets.len(),
+            concurrency
+        );
 
         let assets = Arc::new(Mutex::new(assets));
         let mut handles = Vec::new();
@@ -179,11 +211,18 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                         // Perform the HTTP request
                         let start_time = std::time::Instant::now();
                         let response = Request::get(&url)
-                            .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
+                            .ssl_options(
+                                SslOption::DANGER_ACCEPT_INVALID_CERTS
+                                    | SslOption::DANGER_ACCEPT_REVOKED_CERTS
+                                    | SslOption::DANGER_ACCEPT_INVALID_HOSTS,
+                            )
                             .redirect_policy(RedirectPolicy::Follow)
                             .body(())
                             .map_err(|e| format!("Request creation failed: {}", e))
-                            .and_then(|req| req.send().map_err(|e| format!("Request send failed: {}", e)));
+                            .and_then(|req| {
+                                req.send()
+                                    .map_err(|e| format!("Request send failed: {}", e))
+                            });
 
                         let elapsed = start_time.elapsed();
                         let mut stats = stats.lock().unwrap();
@@ -191,13 +230,20 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                         match response {
                             Ok(response) => {
                                 let status = response.status();
-                                let content_length = response.headers().get("content-length")
+                                let content_length = response
+                                    .headers()
+                                    .get("content-length")
                                     .and_then(|h| h.to_str().ok())
                                     .and_then(|s| s.parse::<usize>().ok())
                                     .unwrap_or(0);
 
-                                stats.add_transaction(elapsed.as_millis() as f64, content_length as u64, status.as_u16());
-                                println!("HTTP/{} {}     {:.2} secs: {} KB ==> GET  {}",
+                                stats.add_transaction(
+                                    elapsed.as_millis() as f64,
+                                    content_length as u64,
+                                    status.as_u16(),
+                                );
+                                println!(
+                                    "HTTP/{} {}     {:.2} secs: {} KB ==> GET  {}",
                                     status.as_str().chars().next().unwrap_or('?'),
                                     status.as_str(),
                                     elapsed.as_secs_f64(),
@@ -207,7 +253,8 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                             }
                             Err(e) => {
                                 stats.add_transaction(elapsed.as_millis() as f64, 0, 0);
-                                println!("HTTP/1.1 0     {:.2} secs: 0 bytes ==> GET  {} (Error: {})",
+                                println!(
+                                    "HTTP/1.1 0     {:.2} secs: 0 bytes ==> GET  {} (Error: {})",
                                     elapsed.as_secs_f64(),
                                     url,
                                     e
@@ -229,8 +276,13 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
     }
 
     // Calculate discovery threads (use provided value or default to CPU cores / 2, min 2, max 8)
-    let discovery_threads = discovery_threads.unwrap_or_else(|| std::cmp::min(8, std::cmp::max(2, num_cpus::get() / 2)));
-    println!("Using {} discovery threads for parallel page crawling (CPU cores: {})", discovery_threads, num_cpus::get());
+    let discovery_threads = discovery_threads
+        .unwrap_or_else(|| std::cmp::min(8, std::cmp::max(2, num_cpus::get() / 2)));
+    println!(
+        "Using {} discovery threads for parallel page crawling (CPU cores: {})",
+        discovery_threads,
+        num_cpus::get()
+    );
 
     // Shared queue for URLs to process
     let urls_to_process = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -259,9 +311,7 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                 ..Default::default()
             };
             let browser = match Browser::new(launch_options) {
-                Ok(browser) => {
-                    browser
-                },
+                Ok(browser) => browser,
                 Err(e) => {
                     eprintln!("Discovery thread {} failed to create browser: {}", i, e);
                     return;
@@ -335,7 +385,10 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
                         }
                     }
                     Err(e) => {
-                        eprintln!("Discovery thread {} failed to process {}: {}", i, current_url, e);
+                        eprintln!(
+                            "Discovery thread {} failed to process {}: {}",
+                            i, current_url, e
+                        );
                     }
                 }
             }
@@ -344,7 +397,10 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
             {
                 let mut active = active_threads.lock().unwrap();
                 *active -= 1;
-                println!("Discovery thread {} exiting, {} threads remaining", i, *active);
+                println!(
+                    "Discovery thread {} exiting, {} threads remaining",
+                    i, *active
+                );
             }
         });
         discovery_handles.push(handle);
@@ -365,7 +421,11 @@ pub async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex
     combined.sort();
     combined.dedup();
 
-    println!("Total discovered {} URLs and {} assets via JavaScript crawling", all_urls.len(), all_assets.len());
+    println!(
+        "Total discovered {} URLs and {} assets via JavaScript crawling",
+        all_urls.len(),
+        all_assets.len()
+    );
 
     Ok(combined)
 }

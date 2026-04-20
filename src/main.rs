@@ -1,21 +1,53 @@
+use clap::CommandFactory;
+use clap::Parser;
+use colored::*;
+use ctrlc;
+use isahc::HttpClient;
+use isahc::config::SslOption;
+use isahc::config::VersionNegotiation;
+use isahc::{Request, config::RedirectPolicy, prelude::*};
+use rand::Rng;
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_xml_rs::from_str;
 use std::collections::HashMap;
 use std::fs;
+use std::process::exit;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::process::exit;
-use clap::Parser;
-use clap::CommandFactory;
-use colored::*;
-use ctrlc;
-use isahc::{config::RedirectPolicy, prelude::*, Request};
-use isahc::config::SslOption;
-use rand::Rng;
-use scraper::{Html, Selector};
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use url::Url;
 mod js_crawler;
+
+/// When true, requests force HTTP/1.1 instead of negotiating HTTP/2.
+/// Set once at startup from the resolved config; read on every request.
+static FORCE_HTTP1: AtomicBool = AtomicBool::new(false);
+
+/// Shared HTTP client with unlimited connection pool per host.
+/// isahc's defaults are browser-like (~6 connections per host), which caps real
+/// concurrency well below the requested `--concurrent` level in a load test.
+static HTTP_CLIENT: OnceLock<HttpClient> = OnceLock::new();
+
+fn http_client() -> &'static HttpClient {
+    HTTP_CLIENT.get_or_init(|| {
+        HttpClient::builder()
+            .max_connections(0)
+            .max_connections_per_host(0)
+            .connect_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
+            .ssl_options(
+                SslOption::DANGER_ACCEPT_INVALID_CERTS
+                    | SslOption::DANGER_ACCEPT_REVOKED_CERTS
+                    | SslOption::DANGER_ACCEPT_INVALID_HOSTS,
+            )
+            .redirect_policy(RedirectPolicy::Follow)
+            .build()
+            .expect("failed to build shared HttpClient")
+    })
+}
 
 /// The struct to deserialize and hold the items in <url></url>
 /// in the sitemap.xml
@@ -33,7 +65,7 @@ struct Urlc {
 /// The struct to hold the urlset items in the sitemap.xml.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct UrlSet {
-    url: Vec<Urlc>
+    url: Vec<Urlc>,
 }
 
 #[derive(Parser)]
@@ -98,6 +130,11 @@ struct Cli {
     /// Rotate through the built-in browser-like User-Agent list (anonymize requests)
     #[arg(short = 'a', long = "anonymize")]
     anonymize: bool,
+
+    /// Force HTTP/1.1 instead of negotiating HTTP/2. HTTP/1.1 responses reliably
+    /// include Content-Length, so inline per-request byte counts match siege.
+    #[arg(short = 'H', long = "http1")]
+    http1: bool,
 }
 
 /// Configuration loaded from a TOML file (everything except URL).
@@ -142,6 +179,8 @@ struct FileConfig {
         alias = "user_agents_list"
     )]
     user_agent_list: Vec<String>,
+    #[serde(default)]
+    http1: Option<bool>,
 }
 
 /// Effective configuration after merging CLI and file. Single source of truth for runtime.
@@ -163,6 +202,7 @@ struct ResolvedConfig {
     user_agent: Option<String>,
     user_agent_list: Vec<String>,
     anonymize: bool,
+    http1: bool,
 }
 
 /// Merges CLI and file config. **CLI takes precedence for all options** except user-agent
@@ -188,6 +228,7 @@ fn resolve_config(cli: Cli, file: &FileConfig) -> ResolvedConfig {
             file.user_agent_list.clone()
         },
         anonymize: cli.anonymize,
+        http1: cli.http1 || file.http1.unwrap_or(false),
     }
 }
 
@@ -287,16 +328,18 @@ impl Stats {
 fn parse_duration(time_str: &str) -> Result<Duration, String> {
     let time_str = time_str.to_uppercase();
     let (num_str, unit) = if time_str.ends_with('S') {
-        (&time_str[..time_str.len()-1], "S")
+        (&time_str[..time_str.len() - 1], "S")
     } else if time_str.ends_with('M') {
-        (&time_str[..time_str.len()-1], "M")
+        (&time_str[..time_str.len() - 1], "M")
     } else if time_str.ends_with('H') {
-        (&time_str[..time_str.len()-1], "H")
+        (&time_str[..time_str.len() - 1], "H")
     } else {
         return Err("Invalid time format. Use format like 5S, 1M, 1H".to_string());
     };
 
-    let num: u64 = num_str.parse().map_err(|_| "Invalid number in time format".to_string())?;
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| "Invalid number in time format".to_string())?;
 
     match unit {
         "S" => Ok(Duration::from_secs(num)),
@@ -341,7 +384,16 @@ fn print_header(concurrent: usize, _url: &str) {
 }
 
 /// Print transaction details with optional highlighting for main URLs
-fn print_transaction(status_code: u16, response_time: f64, data_size: u64, method: &str, path: &str, _verbose: bool, is_main_url: bool, http_version: &str) {
+fn print_transaction(
+    status_code: u16,
+    response_time: f64,
+    data_size: u64,
+    method: &str,
+    path: &str,
+    _verbose: bool,
+    is_main_url: bool,
+    http_version: &str,
+) {
     let status_colored = color_status_code(status_code);
     let response_time_str = format_response_time(response_time);
     let data_size_str = format_data_size(data_size);
@@ -360,12 +412,7 @@ fn print_transaction(status_code: u16, response_time: f64, data_size: u64, metho
     } else {
         println!(
             "{} {}     {}: {} ==> {}  {}",
-            http_version,
-            status_colored,
-            response_time_str,
-            data_size_str,
-            method,
-            path
+            http_version, status_colored, response_time_str, data_size_str, method, path
         );
     }
 }
@@ -377,19 +424,36 @@ fn print_statistics(stats: &Stats) {
     println!("Transactions:\t\t{:8} hits", stats.transactions);
     println!("Availability:\t\t{:8.2} %", stats.availability());
     println!("Elapsed time:\t\t{:8.2} secs", stats.elapsed_time());
-    println!("Data transferred:\t{:8.2} MB", stats.data_transferred as f64 / (1024.0 * 1024.0));
+    println!(
+        "Data transferred:\t{:8.2} MB",
+        stats.data_transferred as f64 / (1024.0 * 1024.0)
+    );
     println!("Response time:\t\t{:8.2} ms", stats.avg_response_time());
-    println!("Transaction rate:\t{:8.2} trans/sec", stats.transaction_rate());
+    println!(
+        "Transaction rate:\t{:8.2} trans/sec",
+        stats.transaction_rate()
+    );
     println!("Throughput:\t\t{:8.2} MB/sec", stats.throughput());
     println!("Concurrency:\t\t{:8.2}", stats.concurrency());
-    println!("Successful transactions: {:8}", stats.successful_transactions);
+    println!(
+        "Successful transactions: {:8}",
+        stats.successful_transactions
+    );
     println!("Failed transactions:\t{:8}", stats.failed_transactions);
 
-    if let Some(&max_time) = stats.response_times.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
+    if let Some(&max_time) = stats
+        .response_times
+        .iter()
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+    {
         println!("Longest transaction:\t{:8.2} ms", max_time);
     }
 
-    if let Some(&min_time) = stats.response_times.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+    if let Some(&min_time) = stats
+        .response_times
+        .iter()
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+    {
         println!("Shortest transaction:\t{:8.2} ms", min_time);
     }
 
@@ -408,24 +472,27 @@ fn common_sitemap_candidates(base_url: &str) -> Vec<String> {
 }
 
 /// Find sitemap URL from robots.txt
-async fn find_sitemap_url_from_robots(base_url: &str, user_agent: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn find_sitemap_url_from_robots(
+    base_url: &str,
+    user_agent: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // Construct robots.txt URL
     let robots_url = format!("{}/robots.txt", base_url);
     println!("Checking robots.txt at {}", robots_url);
 
     // Request robots.txt
-    let response = Request::get(&robots_url)
-        .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
-        .redirect_policy(RedirectPolicy::Follow)
-        .header("User-Agent", user_agent)
-        .body(());
+    let mut builder = Request::get(&robots_url).header("User-Agent", user_agent);
+    if FORCE_HTTP1.load(Ordering::Relaxed) {
+        builder = builder.version_negotiation(VersionNegotiation::http11());
+    }
+    let request = builder.body(());
 
-    if response.is_err() {
+    if request.is_err() {
         println!("Error creating request for robots.txt");
         return Ok(common_sitemap_candidates(base_url));
     }
 
-    let response = response?.send();
+    let response = http_client().send_async(request?).await;
 
     if response.is_err() {
         println!("Error fetching robots.txt");
@@ -435,12 +502,15 @@ async fn find_sitemap_url_from_robots(base_url: &str, user_agent: &str) -> Resul
     let mut response = response?;
 
     if response.status().as_str() != "200" {
-        println!("No robots.txt found (status: {}), will try common sitemap locations", response.status());
+        println!(
+            "No robots.txt found (status: {}), will try common sitemap locations",
+            response.status()
+        );
         return Ok(common_sitemap_candidates(base_url));
     }
 
     // Parse robots.txt to find Sitemap: directives (there may be multiple)
-    let robots_content = response.text()?;
+    let robots_content = response.text().await?;
     let mut sitemap_urls: Vec<String> = Vec::new();
     for line in robots_content.lines() {
         let line = line.trim();
@@ -471,7 +541,7 @@ async fn parse_sitemap_index(content: &str) -> Result<Vec<String>, Box<dyn std::
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct SitemapIndex {
-        sitemap: Vec<SitemapEntry>
+        sitemap: Vec<SitemapEntry>,
     }
 
     // Try to parse as sitemap index
@@ -479,7 +549,7 @@ async fn parse_sitemap_index(content: &str) -> Result<Vec<String>, Box<dyn std::
         Ok(index) => {
             println!("Found sitemap index with {} sitemaps", index.sitemap.len());
             Ok(index.sitemap.into_iter().map(|s| s.loc).collect())
-        },
+        }
         Err(_) => {
             // Not a sitemap index, might be a regular sitemap
             Err("Not a sitemap index".into())
@@ -488,7 +558,10 @@ async fn parse_sitemap_index(content: &str) -> Result<Vec<String>, Box<dyn std::
 }
 
 /// Load URLs from all sitemaps
-async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn load_sitemap(
+    base_url: &str,
+    user_agent_mode: Arc<UserAgentMode>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let user_agent = get_user_agent(&user_agent_mode);
 
     // Find candidate sitemap URLs from robots.txt (or common locations)
@@ -510,18 +583,21 @@ async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Re
         println!("Processing sitemap: {}", current_sitemap_url);
 
         // Fetch the sitemap
-        let response = Request::get(&current_sitemap_url)
-            .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
-            .redirect_policy(RedirectPolicy::Follow)
-            .header("User-Agent", &user_agent)
-            .body(());
+        let mut builder = Request::get(&current_sitemap_url).header("User-Agent", &user_agent);
+        if FORCE_HTTP1.load(Ordering::Relaxed) {
+            builder = builder.version_negotiation(VersionNegotiation::http11());
+        }
+        let request = builder.body(());
 
-        if response.is_err() {
-            println!("Error creating request for sitemap: {}", current_sitemap_url);
+        if request.is_err() {
+            println!(
+                "Error creating request for sitemap: {}",
+                current_sitemap_url
+            );
             continue;
         }
 
-        let response = response?.send();
+        let response = http_client().send_async(request?).await;
 
         if response.is_err() {
             println!("Error fetching sitemap: {}", current_sitemap_url);
@@ -544,11 +620,12 @@ async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Re
         }
 
         any_sitemap_found = true;
-        let mut content = response.text()?;
+        let mut content = response.text().await?;
 
         // Check if we got HTML instead of XML
-        if content.trim_start().to_lowercase().starts_with("<!doctype") ||
-           content.trim_start().to_lowercase().starts_with("<html") {
+        if content.trim_start().to_lowercase().starts_with("<!doctype")
+            || content.trim_start().to_lowercase().starts_with("<html")
+        {
             println!("Sitemap URL returned HTML instead of XML, trying alternative approaches...");
 
             for candidate in common_sitemap_candidates(base_url) {
@@ -576,9 +653,12 @@ async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Re
         match parse_sitemap_index(&content).await {
             Ok(more_sitemap_urls) => {
                 // This is a sitemap index, add all the sitemaps to our processing queue
-                println!("Adding {} more sitemaps to process", more_sitemap_urls.len());
+                println!(
+                    "Adding {} more sitemaps to process",
+                    more_sitemap_urls.len()
+                );
                 sitemap_urls_to_process.extend(more_sitemap_urls);
-            },
+            }
             Err(_) => {
                 // Not a sitemap index, try to parse as a regular sitemap
                 match from_str::<UrlSet>(&content) {
@@ -587,7 +667,7 @@ async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Re
                         let mut urls: Vec<String> = urlset.url.into_iter().map(|u| u.loc).collect();
                         println!("Found {} URLs in sitemap", urls.len());
                         all_page_urls.append(&mut urls);
-                    },
+                    }
                     Err(e) => {
                         println!("Error parsing sitemap: {}", e);
                         // Try to debug by showing first few characters
@@ -612,7 +692,10 @@ async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Re
     all_page_urls.sort();
     all_page_urls.dedup();
 
-    println!("Total unique URLs found across all sitemaps: {}", all_page_urls.len());
+    println!(
+        "Total unique URLs found across all sitemaps: {}",
+        all_page_urls.len()
+    );
 
     if all_page_urls.is_empty() {
         return Err("No URLs found in any sitemap".into());
@@ -621,207 +704,150 @@ async fn load_sitemap(base_url: &str, user_agent_mode: Arc<UserAgentMode>) -> Re
     Ok(all_page_urls)
 }
 
-/// Extract links from a URL and follow them to build a sitemap-like list
+/// Extract links from a URL and follow them to build a sitemap-like list.
+/// Uses a BFS crawl with a link cache to avoid re-fetching pages already visited.
 async fn follow_links_from_url(
     start_url: &str,
     concurrency: usize,
     stats: Arc<Mutex<Stats>>,
     user_agent_mode: Arc<UserAgentMode>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    println!("Follow-links mode: Starting to crawl from {} with {} threads", start_url, concurrency);
+    println!("Follow-links mode: Starting to crawl from {}", start_url);
 
-    // First, get the initial page and extract links
-    let base_url = if let Ok(parsed_url) = Url::parse(start_url) {
-        let scheme = parsed_url.scheme();
-        let host = parsed_url.host_str().unwrap_or_default();
+    let base_url = Arc::new(if let Ok(parsed) = Url::parse(start_url) {
+        let host = parsed.host_str().unwrap_or_default();
         if host.is_empty() {
             start_url.to_string()
         } else {
-            format!("{}://{}", scheme, host)
+            format!("{}://{}", parsed.scheme(), host)
         }
     } else {
         start_url.to_string()
-    };
+    });
 
-    // Make the request to get HTML content
-    let (status_code, response_time, data_size, html_content, _) =
-        make_request(start_url, false, true, user_agent_mode.clone()).await;
+    // Cache: URL -> outgoing same-domain links found on that page.
+    // Populated on first fetch; avoids re-fetching a page just to discover its links.
+    let link_cache: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Update stats for the main request
-    {
-        let mut stats_guard = stats.lock().unwrap();
-        stats_guard.add_transaction(response_time, data_size, status_code);
-    }
+    // All URLs we have seen (or queued). Prevents duplicate frontier entries.
+    let visited: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    visited.lock().unwrap().insert(start_url.to_string());
 
-    // Extract links from the homepage
-    let mut all_links = vec![start_url.to_string()];
-    if let Some(html) = html_content {
-        let links = extract_links(&html, &base_url);
-        all_links.extend(links);
-    }
+    let sem = Arc::new(Semaphore::new(concurrency));
+    let max_urls = 500;
 
-    // Deduplicate links
-    all_links.sort();
-    all_links.dedup();
+    let mut frontier = vec![start_url.to_string()];
 
-    println!("Found {} initial links to process", all_links.len());
-
-    // Create shared data structures with proper synchronization
-    let processed_urls = Arc::new(Mutex::new(std::collections::HashSet::new()));
-    let discovered_urls = Arc::new(Mutex::new(all_links.clone()));
-
-    // Process up to 100 URLs to avoid excessive crawling
-    let max_limit = std::cmp::min(100, all_links.len());
-
-    // Divide work among threads
-    let mut thread_work = Vec::with_capacity(concurrency);
-    for _ in 0..concurrency {
-        thread_work.push(Vec::new());
-    }
-
-    // Distribute URLs to threads in a round-robin fashion
-    for (i, url) in all_links.iter().enumerate().take(max_limit) {
-        let thread_idx = i % concurrency;
-        thread_work[thread_idx].push(url.clone());
-    }
-
-    // Create worker threads
-    let mut handles = vec![];
-    let base_url = Arc::new(base_url);
-    let user_agent_mode = Arc::clone(&user_agent_mode);
-
-    // Spawn worker threads
-    for (_, work) in thread_work.into_iter().enumerate() {
-        if work.is_empty() {
-            continue; // Skip threads with no work
+    while !frontier.is_empty() {
+        if visited.lock().unwrap().len() >= max_urls {
+            break;
         }
 
-        let processed_urls = processed_urls.clone();
-        let discovered_urls = discovered_urls.clone();
-        let base_url = base_url.clone();
-        let stats = stats.clone();
-        let user_agent_mode = user_agent_mode.clone();
+        let batch = std::mem::take(&mut frontier);
+        println!(
+            "Processing {} URLs (total discovered: {})",
+            batch.len(),
+            visited.lock().unwrap().len()
+        );
 
-        let handle = tokio::spawn(async move {
-            for current_url in work {
-                // Skip if already processed
-                {
-                    let mut processed = processed_urls.lock().unwrap();
-                    if processed.contains(&current_url) {
-                        continue;
-                    }
-                    processed.insert(current_url.clone());
+        let mut handles = vec![];
+
+        for url in batch {
+            let sem = sem.clone();
+            let link_cache = link_cache.clone();
+            let base_url = base_url.clone();
+            let stats = stats.clone();
+            let ua = user_agent_mode.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await.unwrap();
+
+                // Return cached links without re-fetching the page
+                if let Some(cached) = link_cache.lock().unwrap().get(&url).cloned() {
+                    return cached;
                 }
 
-                // Extract protocol for asset loading
-                let protocol = if let Ok(parsed_url) = Url::parse(&current_url) {
-                    parsed_url.scheme().to_string()
-                } else {
-                    "https".to_string()
+                // Fetch page
+                let (status, time, size, html, _) =
+                    make_request(&url, false, true, ua.clone(), true).await;
+                stats.lock().unwrap().add_transaction(time, size, status);
+
+                let Some(html_content) = html else {
+                    link_cache.lock().unwrap().insert(url.clone(), vec![]);
+                    return vec![];
                 };
 
-                // Make the request to get HTML content
-                let (status_code, response_time, data_size, html_content, _) =
-                    make_request(&current_url, false, true, user_agent_mode.clone()).await;
+                // Load assets concurrently (cache warming)
+                let protocol = Url::parse(&url)
+                    .map(|p| p.scheme().to_string())
+                    .unwrap_or_else(|_| "https".to_string());
 
-                // Update stats for the main request
-                {
-                    let mut stats_guard = stats.lock().unwrap();
-                    stats_guard.add_transaction(response_time, data_size, status_code);
+                let mut asset_handles = vec![];
+                for mut asset_url in extract_assets(&html_content, &base_url) {
+                    if normalize_url(&asset_url) == normalize_url(&url) {
+                        continue;
+                    }
+                    if asset_url.starts_with("http://") && protocol == "https" {
+                        asset_url = asset_url.replace("http://", "https://");
+                    } else if asset_url.starts_with("https://") && protocol == "http" {
+                        asset_url = asset_url.replace("https://", "http://");
+                    }
+                    let stats = stats.clone();
+                    let ua = ua.clone();
+                    asset_handles.push(tokio::spawn(async move {
+                        let (s, t, sz, _, _) =
+                            make_request(&asset_url, false, false, ua, false).await;
+                        stats.lock().unwrap().add_transaction(t, sz, s);
+                    }));
+                }
+                for h in asset_handles {
+                    let _ = h.await;
                 }
 
-                // If we got HTML content, load assets
-                if let Some(html_clone) = html_content.clone() {
-                    let assets = extract_assets(&html_clone, &base_url);
+                // Extract and cache same-domain links
+                let links = extract_links(&html_content, &base_url);
+                link_cache
+                    .lock()
+                    .unwrap()
+                    .insert(url.clone(), links.clone());
+                links
+            }));
+        }
 
-                    // Process assets in parallel using a local task group
-                    let mut asset_handles = vec![];
-
-                    // Load each asset, but skip the main URL and respect protocol
-                    for mut asset_url in assets {
-                        // Normalize URLs for comparison (ignore http/https difference)
-                        let is_same_url = normalize_url(&asset_url) == normalize_url(&current_url);
-
-                        // Skip if it's the main URL or if it's using a different protocol than requested
-                        if !is_same_url {
-                            // Enforce the same protocol as the main URL
-                            if asset_url.starts_with("http://") && protocol == "https" {
-                                asset_url = asset_url.replace("http://", "https://");
-                            } else if asset_url.starts_with("https://") && protocol == "http" {
-                                asset_url = asset_url.replace("https://", "http://");
-                            }
-
-                            let stats = stats.clone();
-                            let asset_url_clone = asset_url.clone();
-                            let user_agent_mode = user_agent_mode.clone();
-
-                            // Spawn a task for each asset
-                            let handle = tokio::spawn(async move {
-                                let (asset_status, asset_time, asset_size, _, _) =
-                                    make_request(&asset_url_clone, false, false, user_agent_mode).await;
-
-                                // Update stats for asset
-                                {
-                                    let mut stats_guard = stats.lock().unwrap();
-                                    stats_guard.add_transaction(asset_time, asset_size, asset_status);
-                                }
-                            });
-
-                            asset_handles.push(handle);
-                        }
-                    }
-
-                    // Wait for all asset requests to complete
-                    for handle in asset_handles {
-                        let _ = handle.await;
-                    }
-                }
-
-                // Extract additional links from HTML content
-                if let Some(html) = html_content {
-                    let links = extract_links(&html, &base_url);
-
-                    for link in links {
-                        let should_add = {
-                            let processed = processed_urls.lock().unwrap();
-                            !processed.contains(&link)
-                        };
-
-                        if should_add {
-                            {
-                                let mut discovered = discovered_urls.lock().unwrap();
-                                discovered.push(link);
-                            }
-                        }
-                    }
-                }
+        // Collect all links returned by this wave
+        let mut new_links: Vec<String> = Vec::new();
+        for h in handles {
+            if let Ok(links) = h.await {
+                new_links.extend(links);
             }
-        });
+        }
 
-        handles.push(handle);
+        // Enqueue only URLs we haven't seen, up to the cap
+        let mut vis = visited.lock().unwrap();
+        for link in new_links {
+            if vis.len() >= max_urls {
+                break;
+            }
+            if vis.insert(link.clone()) {
+                frontier.push(link);
+            }
+        }
     }
 
-    // Wait for all workers to complete
-    for handle in handles {
-        handle.await?;
-    }
-
-    // Get the final list of discovered URLs
-    let mut final_urls = {
-        let discovered = discovered_urls.lock().unwrap();
-        discovered.clone()
-    };
-
-    // Deduplicate URLs
-    final_urls.sort();
-    final_urls.dedup();
-
-    println!("Discovered {} URLs by following links", final_urls.len());
-    Ok(final_urls)
+    let mut result: Vec<String> = visited.lock().unwrap().iter().cloned().collect();
+    result.sort();
+    println!("Discovered {} unique URLs by following links", result.len());
+    Ok(result)
 }
 
 /// Crawl JavaScript/WASM sites using headless Chrome browser
-async fn crawl_js_site(start_url: &str, concurrency: usize, stats: Arc<Mutex<Stats>>, discovery_threads: Option<usize>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn crawl_js_site(
+    start_url: &str,
+    concurrency: usize,
+    stats: Arc<Mutex<Stats>>,
+    discovery_threads: Option<usize>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     js_crawler::crawl_js_site(start_url, concurrency, stats, discovery_threads).await
 }
 
@@ -854,7 +880,7 @@ fn extract_assets(html_content: &str, base_url: &str) -> Vec<String> {
 
     // Extract images
     if let Ok(img_selector) = Selector::parse("img[src]") {
-    for img in html.select(&img_selector) {
+        for img in html.select(&img_selector) {
             if let Some(src) = img.value().attr("src") {
                 if !src.starts_with("data:image/") {
                     if let Ok(asset_url) = build_asset_url(src, base_url) {
@@ -882,10 +908,11 @@ fn extract_links(html_content: &str, base_url: &str) -> Vec<String> {
             if let Some(href) = a.value().attr("href") {
                 // Skip empty links, anchors, javascript, mailto, tel links
                 if href.is_empty()
-                   || href.starts_with('#')
-                   || href.starts_with("javascript:")
-                   || href.starts_with("mailto:")
-                   || href.starts_with("tel:") {
+                    || href.starts_with('#')
+                    || href.starts_with("javascript:")
+                    || href.starts_with("mailto:")
+                    || href.starts_with("tel:")
+                {
                     continue;
                 }
 
@@ -894,11 +921,11 @@ fn extract_links(html_content: &str, base_url: &str) -> Vec<String> {
                     match (&base_domain, extract_domain(&link_url)) {
                         (Some(base), Some(link)) if base == &link => {
                             links.push(link_url);
-                        },
+                        }
                         (None, _) => {
                             // If we couldn't extract base domain, include all links
                             links.push(link_url);
-                        },
+                        }
                         _ => {} // Different domains or couldn't extract link domain
                     }
                 }
@@ -1022,7 +1049,14 @@ fn normalize_url(url: &str) -> String {
 
     // Add domain if it's just a path
     if !normalized.contains('.') && !normalized.is_empty() {
-        normalized = format!("abh.ai{}", if normalized.starts_with('/') { normalized } else { format!("/{}", normalized) });
+        normalized = format!(
+            "abh.ai{}",
+            if normalized.starts_with('/') {
+                normalized
+            } else {
+                format!("/{}", normalized)
+            }
+        );
     }
 
     normalized
@@ -1041,79 +1075,135 @@ fn build_asset_url(asset_path: &str, base_url: &str) -> Result<String, url::Pars
     }
 }
 
-/// Make a single HTTP request with optional highlighting
+/// Make a single HTTP request asynchronously.
+///
+/// `need_body = true`: reads the response body as text (for HTML → link/asset extraction).
+/// `need_body = false`: returns as soon as response headers arrive. The body is drained
+/// in a background task so the connection can be reused (keep-alive). This is what we
+/// want for load testing and for asset fetches — we only care that the server served a
+/// response, not about its contents.
 async fn make_request(
     url: &str,
     _verbose: bool,
     is_main_url: bool,
     user_agent_mode: Arc<UserAgentMode>,
+    need_body: bool,
 ) -> (u16, f64, u64, Option<String>, String) {
     let start = Instant::now();
-
     let user_agent = get_user_agent(&user_agent_mode);
 
-    let result = Request::get(url)
+    let mut builder = Request::get(url)
         .header("User-Agent", user_agent)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
         .header("Accept-Language", "en-US,en;q=0.9")
         .header("Accept-Encoding", "gzip, deflate")
         .header("Connection", "keep-alive")
-        .ssl_options(SslOption::DANGER_ACCEPT_INVALID_CERTS | SslOption::DANGER_ACCEPT_REVOKED_CERTS | SslOption::DANGER_ACCEPT_INVALID_HOSTS)
-        .redirect_policy(RedirectPolicy::Follow)
-        .body(())
-        .map_err(|_| ())
-        .and_then(|req| req.send().map_err(|_| ()));
-
-    let elapsed = start.elapsed();
-    let response_time = elapsed.as_millis() as f64;
-
-    match result {
-        Ok(mut resp) => {
-            let status_code = resp.status().as_u16();
-            let parsed_url = Url::parse(url);
-            let path = parsed_url
-                .as_ref()
-                .map(|u| u.path())
-                .unwrap_or("/");
-
-            // Get the HTTP version
-            let http_version = match resp.version() {
-                isahc::http::Version::HTTP_09 => "HTTP/0.9",
-                isahc::http::Version::HTTP_10 => "HTTP/1.0",
-                isahc::http::Version::HTTP_11 => "HTTP/1.1",
-                isahc::http::Version::HTTP_2 => "HTTP/2.0",
-                isahc::http::Version::HTTP_3 => "HTTP/3.0",
-                _ => "HTTP/1.1", // Default fallback
-            }.to_string();
-
-            // Try to get HTML content for asset extraction and calculate actual data size
-            let (html_content, data_size) = if status_code == 200 {
-                match resp.text() {
-                    Ok(content) => {
-                        let actual_size = content.len() as u64;
-                        (Some(content), actual_size)
-                    }
-                    Err(_) => (None, 0)
-                }
-            } else {
-                (None, 0)
-            };
-
-            if path.is_empty() {
-                print_transaction(status_code, response_time, data_size, "GET", "/", _verbose, is_main_url, &http_version);
-            } else {
-                print_transaction(status_code, response_time, data_size, "GET", path, _verbose, is_main_url, &http_version);
-            }
-
-            (status_code, response_time, data_size, html_content, http_version)
-        }
-        Err(_) => {
-            // For errors, we don't have HTTP version information, so use a default
-            let default_version = "HTTP/1.1".to_string();
-            print_transaction(0, response_time, 0, "GET", url, _verbose, is_main_url, &default_version);
-            (0, response_time, 0, None, default_version)
-        }
+        .ssl_options(
+            SslOption::DANGER_ACCEPT_INVALID_CERTS
+                | SslOption::DANGER_ACCEPT_REVOKED_CERTS
+                | SslOption::DANGER_ACCEPT_INVALID_HOSTS,
+        )
+        .redirect_policy(RedirectPolicy::Follow);
+    if FORCE_HTTP1.load(Ordering::Relaxed) {
+        builder = builder.version_negotiation(VersionNegotiation::http11());
     }
+    let req_result = builder.body(());
+
+    let req = match req_result {
+        Ok(r) => r,
+        Err(_) => return request_error(start, url, _verbose, is_main_url),
+    };
+
+    let mut resp = match http_client().send_async(req).await {
+        Ok(r) => r,
+        Err(_) => return request_error(start, url, _verbose, is_main_url),
+    };
+
+    // Response headers are in — stop the TTFB clock before we touch the body.
+    let response_time = start.elapsed().as_millis() as f64;
+    let status_code = resp.status().as_u16();
+
+    let http_version = match resp.version() {
+        isahc::http::Version::HTTP_09 => "HTTP/0.9",
+        isahc::http::Version::HTTP_10 => "HTTP/1.0",
+        isahc::http::Version::HTTP_11 => "HTTP/1.1",
+        isahc::http::Version::HTTP_2 => "HTTP/2.0",
+        isahc::http::Version::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/1.1",
+    }
+    .to_string();
+
+    // Content-Length for reporting bytes even when we skip the body.
+    let content_length: u64 = resp
+        .headers()
+        .get("content-length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let (html_content, data_size) = if status_code == 200 && need_body {
+        match resp.text().await {
+            Ok(content) => {
+                let size = content.len() as u64;
+                (Some(content), size)
+            }
+            Err(_) => (None, 0),
+        }
+    } else {
+        // Drain the body in the background so libcurl can reuse the connection
+        // instead of tearing it down. We've already stopped the timing clock.
+        tokio::spawn(async move {
+            let mut resp = resp;
+            let _ = resp.consume().await;
+        });
+        (None, content_length)
+    };
+
+    let parsed_url = Url::parse(url);
+    let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or("/");
+    let display_path = if path.is_empty() { "/" } else { path };
+    print_transaction(
+        status_code,
+        response_time,
+        data_size,
+        "GET",
+        display_path,
+        _verbose,
+        is_main_url,
+        &http_version,
+    );
+
+    (
+        status_code,
+        response_time,
+        data_size,
+        html_content,
+        http_version,
+    )
+}
+
+fn request_error(
+    start: Instant,
+    url: &str,
+    verbose: bool,
+    is_main_url: bool,
+) -> (u16, f64, u64, Option<String>, String) {
+    let response_time = start.elapsed().as_millis() as f64;
+    let default_version = "HTTP/1.1".to_string();
+    print_transaction(
+        0,
+        response_time,
+        0,
+        "GET",
+        url,
+        verbose,
+        is_main_url,
+        &default_version,
+    );
+    (0, response_time, 0, None, default_version)
 }
 
 /// Crawl mode - process each URL only once
@@ -1123,6 +1213,7 @@ async fn crawl_urls(
     verbose: bool,
     no_assets: bool,
     user_agent_mode: Arc<UserAgentMode>,
+    asset_cache: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
     let mut processed_urls = std::collections::HashSet::new();
     let mut urls_to_process = urls;
@@ -1152,7 +1243,7 @@ async fn crawl_urls(
 
         if no_assets {
             let (status_code, response_time, data_size, _, _) =
-                make_request(&current_url, verbose, true, user_agent_mode.clone()).await;
+                make_request(&current_url, verbose, true, user_agent_mode.clone(), false).await;
 
             // Update stats
             {
@@ -1169,13 +1260,16 @@ async fn crawl_urls(
                 &current_url,
                 &protocol,
                 user_agent_mode.clone(),
+                asset_cache.clone(),
             )
             .await;
         }
     }
 }
 
-/// Load static assets from a URL with optional highlighting
+/// Load static assets from a URL. Fetches the page, then fetches all assets in parallel.
+/// Uses `asset_cache` so the HTML is parsed for assets only on the first visit per URL;
+/// subsequent visits reuse the cached, deduped asset list.
 async fn load_assets_from_url(
     url: &str,
     base_url: &str,
@@ -1185,44 +1279,65 @@ async fn load_assets_from_url(
     main_url: &str,
     protocol: &str,
     user_agent_mode: Arc<UserAgentMode>,
+    asset_cache: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
-    let (status_code, response_time, data_size, html_content, _) =
-        make_request(url, verbose, is_main_url, user_agent_mode.clone()).await;
+    let cached = asset_cache.lock().unwrap().get(url).cloned();
 
-    // Update stats for the main request
+    // Only read the HTML body on the first visit to this URL (to extract assets).
+    // Once assets are cached, we just need headers to know the server responded.
+    let need_body = cached.is_none();
+    let (status_code, response_time, data_size, html_content, _) = make_request(
+        url,
+        verbose,
+        is_main_url,
+        user_agent_mode.clone(),
+        need_body,
+    )
+    .await;
+
     {
         let mut stats = stats.lock().unwrap();
         stats.add_transaction(response_time, data_size, status_code);
     }
 
-    // If we got HTML content, extract and load assets
-    if let Some(html) = html_content {
-        let assets = extract_assets(&html, base_url);
+    // Use cached asset list if we have one; otherwise parse HTML once and cache it.
+    let assets: Vec<String> = if let Some(list) = cached {
+        list
+    } else if let Some(ref html) = html_content {
+        let mut extracted = extract_assets(html, base_url);
+        extracted.sort();
+        extracted.dedup();
+        asset_cache
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), extracted.clone());
+        extracted
+    } else {
+        return;
+    };
 
-        // Load each asset, but skip the main URL and respect protocol
-        for mut asset_url in assets {
-            // Normalize URLs for comparison (ignore http/https difference)
-            let is_same_url = normalize_url(&asset_url) == normalize_url(main_url);
-
-            // Skip if it's the main URL or if it's using a different protocol than requested
-            if !is_same_url {
-                // Enforce the same protocol as the main URL
-                if asset_url.starts_with("http://") && protocol == "https" {
-                    asset_url = asset_url.replace("http://", "https://");
-                } else if asset_url.starts_with("https://") && protocol == "http" {
-                    asset_url = asset_url.replace("https://", "http://");
-                }
-
-                let (asset_status, asset_time, asset_size, _, _) =
-                    make_request(&asset_url, verbose, false, user_agent_mode.clone()).await;
-
-                // Update stats for asset
-                {
-                    let mut stats = stats.lock().unwrap();
-                    stats.add_transaction(asset_time, asset_size, asset_status);
-                }
-            }
+    let main_normalized = normalize_url(main_url);
+    let mut handles = vec![];
+    for mut asset_url in assets {
+        if normalize_url(&asset_url) == main_normalized {
+            continue;
         }
+        if asset_url.starts_with("http://") && protocol == "https" {
+            asset_url = asset_url.replace("http://", "https://");
+        } else if asset_url.starts_with("https://") && protocol == "http" {
+            asset_url = asset_url.replace("https://", "http://");
+        }
+
+        let stats = stats.clone();
+        let ua = user_agent_mode.clone();
+        handles.push(tokio::spawn(async move {
+            let (s, t, sz, _, _) = make_request(&asset_url, verbose, false, ua, false).await;
+            let mut stats = stats.lock().unwrap();
+            stats.add_transaction(t, sz, s);
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
     }
 }
 
@@ -1239,26 +1354,25 @@ async fn run_user(
     thread_id: usize,
     total_threads: usize,
     user_agent_mode: Arc<UserAgentMode>,
+    asset_cache: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
     let mut rng = std::collections::hash_map::DefaultHasher::new();
     let start_time = Instant::now();
     let mut request_count = 0;
 
-    // Calculate which URLs this thread should process
-    let urls_per_thread = if urls.len() < total_threads {
-        1 // If we have fewer URLs than threads, each thread gets at least one URL
+    // Assign each thread a contiguous slice of the URL list.
+    // When there are fewer URLs than threads (common in -f mode with small sites),
+    // wrap around so every thread gets at least one URL and stays active.
+    let (start_idx, end_idx) = if urls.len() <= total_threads {
+        // Each thread owns exactly one URL (round-robin wrapping).
+        let idx = thread_id % urls.len();
+        (idx, idx + 1)
     } else {
-        urls.len() / total_threads + if urls.len() % total_threads > 0 { 1 } else { 0 }
+        let urls_per_thread = (urls.len() + total_threads - 1) / total_threads;
+        let s = thread_id * urls_per_thread;
+        let e = std::cmp::min(s + urls_per_thread, urls.len());
+        (s, e)
     };
-
-    // Calculate start and end indices for this thread's URL chunk
-    let start_idx = thread_id * urls_per_thread;
-    let end_idx = std::cmp::min(start_idx + urls_per_thread, urls.len());
-
-    // If this thread has no URLs to process (can happen if we have more threads than URLs)
-    if start_idx >= urls.len() {
-        return;
-    }
 
     loop {
         // Check if we should stop based on duration
@@ -1304,7 +1418,7 @@ async fn run_user(
         // Make request and load assets unless disabled
         if no_assets {
             let (status_code, response_time, data_size, _, _) =
-                make_request(&url, verbose, true, user_agent_mode.clone()).await;
+                make_request(&url, verbose, true, user_agent_mode.clone(), false).await;
 
             // Update stats
             {
@@ -1321,6 +1435,7 @@ async fn run_user(
                 &url,
                 &protocol,
                 user_agent_mode.clone(),
+                asset_cache.clone(),
             )
             .await;
         }
@@ -1329,7 +1444,7 @@ async fn run_user(
 
         // Delay between requests with some randomness
         if delay > 0 {
-            let random_delay = delay + rand::rng().random_range(0..=delay/2);
+            let random_delay = delay + rand::rng().random_range(0..=delay / 2);
             sleep(Duration::from_secs(random_delay)).await;
         }
     }
@@ -1370,7 +1485,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.block_on(async_main(resolved, url))
 }
 
-async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn async_main(
+    resolved: ResolvedConfig,
+    url: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    FORCE_HTTP1.store(resolved.http1, Ordering::Relaxed);
 
     // Setup stats and signal handler
     let stats = Arc::new(Mutex::new(Stats::new()));
@@ -1390,7 +1509,14 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
     let urls = if let Some(ref url) = url {
         if resolved.js_mode {
             // If JS mode is enabled, use headless Chrome to crawl JavaScript/WASM sites
-            match crawl_js_site(url, resolved.concurrent, stats.clone(), resolved.discovery_threads).await {
+            match crawl_js_site(
+                url,
+                resolved.concurrent,
+                stats.clone(),
+                resolved.discovery_threads,
+            )
+            .await
+            {
                 Ok(discovered_urls) => discovered_urls,
                 Err(js_err) => {
                     eprintln!("Failed to crawl JavaScript site: {}", js_err);
@@ -1399,7 +1525,14 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
             }
         } else if resolved.follow_links {
             // If follow-links is enabled, bypass sitemap processing entirely
-            match follow_links_from_url(url, resolved.concurrent, stats.clone(), user_agent_mode.clone()).await {
+            match follow_links_from_url(
+                url,
+                resolved.concurrent,
+                stats.clone(),
+                user_agent_mode.clone(),
+            )
+            .await
+            {
                 Ok(discovered_urls) => discovered_urls,
                 Err(follow_err) => {
                     eprintln!("Failed to follow links: {}", follow_err);
@@ -1411,7 +1544,10 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
             match load_sitemap(url, user_agent_mode.clone()).await {
                 Ok(sitemap_urls) => sitemap_urls,
                 Err(e) => {
-                    eprintln!("Failed to load sitemap: {}. Try using --follow-links or --js option.", e);
+                    eprintln!(
+                        "Failed to load sitemap: {}. Try using --follow-links or --js option.",
+                        e
+                    );
                     return Ok(());
                 }
             }
@@ -1449,11 +1585,19 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
     } else if resolved.js_mode {
         println!("** WARMER 0.1.2");
         println!("** JavaScript mode - using headless Chrome browser to crawl JS/WASM sites");
-        println!("** Preparing {} concurrent users for battle.", resolved.concurrent);
+        println!(
+            "** Preparing {} concurrent users for battle.",
+            resolved.concurrent
+        );
         println!("The server is now under load...");
     } else {
         print_header(resolved.concurrent, &display_url);
     }
+
+    // Shared asset cache: URL -> deduped list of asset URLs.
+    // Avoids re-parsing HTML and re-discovering the same assets for every iteration.
+    let asset_cache: Arc<Mutex<HashMap<String, Vec<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Handle execution modes
     if resolved.crawl {
@@ -1464,6 +1608,7 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
             resolved.verbose,
             resolved.no_assets,
             user_agent_mode.clone(),
+            asset_cache.clone(),
         )
         .await;
     } else {
@@ -1481,6 +1626,7 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
             let internet_mode = resolved.internet;
             let no_assets = resolved.no_assets;
             let user_agent_mode = user_agent_mode.clone();
+            let asset_cache = asset_cache.clone();
 
             let handle = tokio::spawn(async move {
                 run_user(
@@ -1495,6 +1641,7 @@ async fn async_main(resolved: ResolvedConfig, url: Option<String>) -> Result<(),
                     thread_id,
                     total_threads,
                     user_agent_mode,
+                    asset_cache,
                 )
                 .await;
             });
