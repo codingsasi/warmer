@@ -1,5 +1,5 @@
 # warmer
-A HTTP load testing and CDN cache warming tool in Rust. Inspired by tools like siege and wrk, warmer provides advanced features including sitemap-based cache warming, JavaScript site crawling, and comprehensive asset discovery with concurrent request handling.
+A HTTP load testing and CDN cache warming tool in Rust. Inspired by tools like siege and wrk, warmer provides advanced features including sitemap-based cache warming, JavaScript site crawling, and asset discovery (css, js, images etc) with concurrent request handling.
 
 ## Quick Start
 
@@ -194,28 +194,34 @@ If you prefer to build from source:
 ## Output Example
 
 ```
-** WARMER 0.1.8
+Checking robots.txt at https://abh.ai/robots.txt
+Found 1 sitemap URL(s) in robots.txt
+Processing sitemap: https://abh.ai/sitemap.xml
+Found 102 URLs in sitemap
+Total unique URLs found across all sitemaps: 99
+** WARMER 0.1.2
 ** Preparing 25 concurrent users for battle.
 The server is now under load...
-HTTP/2.0 200     0.03 secs: 8971 bytes ==> GET  /
-HTTP/1.1 200     0.15 secs: 1585 bytes ==> GET  /menu/page.js
-HTTP/2.0 200     0.20 secs: 8423 bytes ==> GET  /s3fs-public/styles/max_325x325/public/2023-10/ubuntu-canonical.png
-...
-
+HTTP/2.0 200     0.10 secs: 4 KB ==> GET  /
+HTTP/2.0 200     0.28 secs: 191 KB ==> GET  /pagead/js/adsbygoogle.js
+HTTP/2.0 200     0.30 secs: 191 KB ==> GET  /pagead/js/adsbygoogle.js
+HTTP/2.0 200     0.29 secs: 0 bytes ==> GET  /fe_bg.wasm
+HTTP/2.0 200     0.30 secs: 191 KB ==> GET  /pagead/js/adsbygoogle.js
+HTTP/2.0 200     0.31 secs: 0 bytes ==> GET  /beacon.min.js
 Load testing completed...
 
-Transactions:                475 hits
+Transactions:                  1 hits
 Availability:             100.00 %
-Elapsed time:              19.59 secs
+Elapsed time:               0.24 secs
 Data transferred:           0.00 MB
-Response time:             38.21 ms
-Transaction rate:          24.25 trans/sec
-Throughput:                 0.00 MB/sec
-Concurrency:                0.93
-Successful transactions:      475
+Response time:            103.00 ms
+Transaction rate:           4.17 trans/sec
+Throughput:                 0.01 MB/sec
+Concurrency:                0.43
+Successful transactions:        1
 Failed transactions:           0
-Longest transaction:      141.00 ms
-Shortest transaction:      26.00 ms
+Longest transaction:      103.00 ms
+Shortest transaction:     103.00 ms
 ```
 
 ## Notes
