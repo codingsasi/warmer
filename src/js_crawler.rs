@@ -15,6 +15,7 @@ pub async fn crawl_js_site(
     concurrency: usize,
     stats: Arc<Mutex<Stats>>,
     discovery_threads: Option<usize>,
+    no_assets: bool,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     println!(
         "JavaScript mode: Starting headless Chrome browser to crawl from {}",
@@ -364,8 +365,10 @@ pub async fn crawl_js_site(
                 // 1. Discover URLs and assets from this page
                 match discover_page(&current_url, &base_host, &browser) {
                     Ok((page_urls, page_assets)) => {
-                        // 2. Load test the discovered assets immediately
-                        load_test_assets(page_assets.clone(), stats.clone(), concurrency);
+                        // 2. Load test the discovered assets immediately (skip when -n)
+                        if !no_assets {
+                            load_test_assets(page_assets.clone(), stats.clone(), concurrency);
+                        }
 
                         // 3. Add new URLs to global collection and processing queue
                         {
@@ -379,8 +382,10 @@ pub async fn crawl_js_site(
                                 }
                             }
 
-                            for asset in &page_assets {
-                                all_assets.insert(asset.clone());
+                            if !no_assets {
+                                for asset in &page_assets {
+                                    all_assets.insert(asset.clone());
+                                }
                             }
                         }
                     }

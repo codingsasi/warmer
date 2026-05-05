@@ -76,6 +76,7 @@ async fn async_main(
                 resolved.concurrent,
                 stats.clone(),
                 resolved.discovery_threads,
+                resolved.no_assets,
             )
             .await
             {
@@ -91,6 +92,7 @@ async fn async_main(
                 resolved.concurrent,
                 stats.clone(),
                 user_agent_mode.clone(),
+                resolved.no_assets,
             )
             .await
             {

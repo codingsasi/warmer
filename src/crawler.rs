@@ -154,6 +154,7 @@ pub async fn follow_links_from_url(
     concurrency: usize,
     stats: Arc<Mutex<Stats>>,
     user_agent_mode: Arc<UserAgentMode>,
+    no_assets: bool,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     println!("Follow-links mode: Starting to crawl from {}", start_url);
 
@@ -222,31 +223,33 @@ pub async fn follow_links_from_url(
                     return vec![];
                 };
 
-                // Load assets concurrently (cache warming)
-                let protocol = Url::parse(&url)
-                    .map(|p| p.scheme().to_string())
-                    .unwrap_or_else(|_| "https".to_string());
+                if !no_assets {
+                    // Load assets concurrently (cache warming)
+                    let protocol = Url::parse(&url)
+                        .map(|p| p.scheme().to_string())
+                        .unwrap_or_else(|_| "https".to_string());
 
-                let mut asset_handles = vec![];
-                for mut asset_url in extract_assets(&html_content, &base_url) {
-                    if normalize_url(&asset_url) == normalize_url(&url) {
-                        continue;
+                    let mut asset_handles = vec![];
+                    for mut asset_url in extract_assets(&html_content, &base_url) {
+                        if normalize_url(&asset_url) == normalize_url(&url) {
+                            continue;
+                        }
+                        if asset_url.starts_with("http://") && protocol == "https" {
+                            asset_url = asset_url.replace("http://", "https://");
+                        } else if asset_url.starts_with("https://") && protocol == "http" {
+                            asset_url = asset_url.replace("https://", "http://");
+                        }
+                        let stats = stats.clone();
+                        let ua = ua.clone();
+                        asset_handles.push(tokio::spawn(async move {
+                            let (s, t, sz, _, _) =
+                                make_request(&asset_url, false, false, ua, false).await;
+                            stats.lock().unwrap().add_transaction(t, sz, s);
+                        }));
                     }
-                    if asset_url.starts_with("http://") && protocol == "https" {
-                        asset_url = asset_url.replace("http://", "https://");
-                    } else if asset_url.starts_with("https://") && protocol == "http" {
-                        asset_url = asset_url.replace("https://", "http://");
+                    for h in asset_handles {
+                        let _ = h.await;
                     }
-                    let stats = stats.clone();
-                    let ua = ua.clone();
-                    asset_handles.push(tokio::spawn(async move {
-                        let (s, t, sz, _, _) =
-                            make_request(&asset_url, false, false, ua, false).await;
-                        stats.lock().unwrap().add_transaction(t, sz, s);
-                    }));
-                }
-                for h in asset_handles {
-                    let _ = h.await;
                 }
 
                 // Extract and cache same-domain links
