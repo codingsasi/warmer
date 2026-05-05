@@ -1,4 +1,4 @@
-use crate::Stats;
+use crate::stats::Stats;
 use headless_chrome::{Browser, LaunchOptions};
 use isahc::{
     Request,
